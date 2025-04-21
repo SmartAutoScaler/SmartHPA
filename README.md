@@ -1,0 +1,2 @@
+# SmartHPA
+AI Managed HPA
