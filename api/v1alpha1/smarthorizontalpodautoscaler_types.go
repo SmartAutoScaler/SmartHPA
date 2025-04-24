@@ -116,9 +116,9 @@ type SmartHorizontalPodAutoscalerSpec struct {
 
 // SmartHorizontalPodAutoscalerStatus defines the observed state of SmartHorizontalPodAutoscaler
 type SmartHorizontalPodAutoscalerStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
+	// Conditions represents the latest available observations of SmartHPA's current state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// HPASpecTemplate *HPASpecTemplate    `json:"HPASpecTemplate,omitempty" protobuf:"bytes,1,opt,name=HPASpecTemplate"`
 	HPAObjectRef *HPAObjectReference `json:"HPAObjectRef,omitempty" protobuf:"bytes,2,opt,name=HPAObjectRef"`
 	Triggers     Triggers            `json:"triggers,omitempty" protobuf:"bytes,3,opt,name=triggers"`

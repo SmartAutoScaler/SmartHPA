@@ -1,0 +1,57 @@
+name: Build and Test
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        go mod download
+        go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
+
+    - name: Generate CRDs and code
+      run: |
+        make generate
+        make manifests
+
+    - name: Build
+      run: make build
+
+    - name: Run tests
+      run: make test
+
+    - name: Run e2e tests
+      run: make test-e2e
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./cover.out
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+    - name: Check if working tree is dirty
+      run: |
+        if [[ $(git status --porcelain) ]]; then
+          echo "Working tree is dirty after generating files"
+          git status --porcelain
+          git diff
+          exit 1
+        fi
