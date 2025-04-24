@@ -1,0 +1,52 @@
+apiVersion: autoscaling.sarabala.io/v1alpha1
+kind: SmartHorizontalPodAutoscaler
+metadata:
+  name: example-smarthpa
+  namespace: default
+  labels:
+    app.kubernetes.io/name: smarthpa
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  HPAObjectRef:
+    name: my-app-hpa
+    namespace: default
+  HPASpecTemplate:
+    metadata:
+      name: my-app-hpa-template
+    spec:
+      minReplicas: 1
+      maxReplicas: 10
+  triggers:
+    - name: workday-schedule
+      schedules:
+        - interval:
+            timezone: "America/Los_Angeles"
+            recurring: "Schedule=Daily;dayOps=M,TU,W,TH,F"
+            startDate: "2025-01-01T00:00:00Z"
+            endDate: "2025-12-31T23:59:59Z"
+          startHPAConfig:
+            minReplicas: 3
+            maxReplicas: 10
+            desiredReplicas: 5
+          endHPAConfig:
+            minReplicas: 1
+            maxReplicas: 3
+            desiredReplicas: 1
+    - name: weekend-maintenance
+      schedules:
+        - interval:
+            timezone: "America/Los_Angeles"
+            recurring: "Schedule=Weekly;dayOps=SAT"
+          startHPAConfig:
+            minReplicas: 2
+            maxReplicas: 5
+            desiredReplicas: 3
+    - name: monthly-maintenance
+      schedules:
+        - interval:
+            timezone: "America/Los_Angeles"
+            recurring: "Schedule=Monthly;dayOps=1SUN"
+          startHPAConfig:
+            minReplicas: 1
+            maxReplicas: 2
+            desiredReplicas: 1

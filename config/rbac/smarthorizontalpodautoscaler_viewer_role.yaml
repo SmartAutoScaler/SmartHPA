@@ -1,0 +1,23 @@
+# permissions for end users to view smarthorizontalpodautoscalers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: smarthpa
+    app.kubernetes.io/managed-by: kustomize
+  name: smarthorizontalpodautoscaler-viewer-role
+rules:
+- apiGroups:
+  - autoscaling.sarabala.io
+  resources:
+  - smarthorizontalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - autoscaling.sarabala.io
+  resources:
+  - smarthorizontalpodautoscalers/status
+  verbs:
+  - get
