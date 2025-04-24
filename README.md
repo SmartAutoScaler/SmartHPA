@@ -14,6 +14,16 @@ SmartHPA provides intelligent pod scaling based on time windows and recurring sc
 - **Flexible Configuration**: Configure min replicas, max replicas, and desired replicas for each time window
 - **Multiple Triggers**: Define multiple triggers with different schedules and configurations
 
+## Container Image
+
+The SmartHPA container image is available on Quay.io:
+
+```sh
+quay.io/sarabala1979/smarthpa:latest
+```
+
+You can also use specific version tags like `v1.0.0` or `v1.0`.
+
 ## Getting Started
 
 ### Prerequisites
