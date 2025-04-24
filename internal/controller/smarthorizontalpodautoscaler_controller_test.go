@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -124,6 +125,10 @@ var _ = Describe("SmartHorizontalPodAutoscaler Controller", func() {
 					Client: k8sClient,
 					Scheme: k8sClient.Scheme(),
 				}
+
+				By("Setting test timeouts")
+				SetDefaultEventuallyTimeout(10 * time.Second)
+				SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
 
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 					NamespacedName: typeNamespacedName,

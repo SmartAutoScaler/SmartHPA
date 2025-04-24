@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -34,14 +33,12 @@ type SmartHPAContext struct {
 	client    client.Client
 	schedules map[string]*TriggerSchedule
 	cron      *cron.Cron
-	mu        sync.RWMutex
 }
 
 // Scheduler manages the scheduling of HPA configurations
 type Scheduler struct {
-	mu       sync.RWMutex
 	client   client.Client
-	contexts map[types.NamespacedName]*SmartHPAContext // key: namespace/name/triggername
+	contexts map[types.NamespacedName]*SmartHPAContext // key: namespace/nam
 	queue    chan types.NamespacedName
 }
 
@@ -235,6 +232,7 @@ func (ts *TriggerSchedule) UpdateHPAConfig(config sarabalaiov1alpha1.HPAConfig) 
 	// Get the HPA object
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
 	err := ts.client.Get(context.Background(), ts.HPANamespacedName, hpa)
+	klog.Infof("Got HPA %s", hpa.String())
 	if err != nil {
 		klog.Errorf("Failed to get HPA %s: %v", ts.HPANamespacedName.String(), err)
 		return err
@@ -277,6 +275,7 @@ func (sc *SmartHPAContext) execute(ctx context.Context) {
 				schedule.Schedule()
 			}
 		}
+		// Add a recurring job to refresh the context
 		sc.cron.AddFunc("0 0 * * *", func() {
 			klog.Infof("Executing SmartHPAContext with %d schedules", len(sc.schedules))
 			sc.execute(ctx)

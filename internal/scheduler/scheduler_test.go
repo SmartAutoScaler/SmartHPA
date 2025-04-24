@@ -162,6 +162,11 @@ func TestUpdateHPAConfig(t *testing.T) {
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			MinReplicas: &minReplicas,
 			MaxReplicas: maxReplicas,
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				Kind:       "Deployment",
+				Name:       "test-app",
+				APIVersion: "apps/v1",
+			},
 		},
 	}
 
@@ -302,6 +307,11 @@ func TestSmartHPAContextExecute(t *testing.T) {
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			MinReplicas: &minReplicas,
 			MaxReplicas: maxReplicas,
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				Kind:       "Deployment",
+				Name:       "test-app",
+				APIVersion: "apps/v1",
+			},
 		},
 	}
 
