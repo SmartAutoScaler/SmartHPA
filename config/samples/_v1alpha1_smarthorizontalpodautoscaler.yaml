@@ -17,21 +17,19 @@ spec:
       startHPAConfig:
         minReplicas: 3
         maxReplicas: 10
-        desiredReplicas: 5
       endHPAConfig:
         minReplicas: 1
         maxReplicas: 3
-        desiredReplicas: 1
-      startTime: "09:00:00"
-      endTime: "21:17:00"
+      startTime: "14:35:00"
+      endTime: "14:40:00"
     - name: weekend-scale-down
       interval:
         timezone: "America/Los_Angeles"
         recurring: "M,TU,W,TH,F"
         # startDate: "2025-04-22T00:00:00-07:00"
         # endDate: "2025-12-31T23:59:59-07:00"
-      startTime: "21:19:00"
-      endTime: "23:59:59"
+      startTime: "14:41:00"
+      endTime: "14:43:00"
       startHPAConfig:
         minReplicas: 1
         maxReplicas: 2

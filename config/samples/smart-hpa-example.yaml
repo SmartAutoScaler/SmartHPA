@@ -1,0 +1,55 @@
+apiVersion: autoscaling.sarabala.io/v1alpha1
+kind: SmartHorizontalPodAutoscaler
+metadata:
+  name: smart-hpa-demo
+  namespace: default
+spec:
+  smartRecommendation:
+    enabled: true
+    frequency: 30
+  HPAObjectRef:
+    namespace: default
+    name: example-hpa
+  triggers:
+    - name: workday-scaling
+      timezone: "America/Los_Angeles"
+      interval:
+        recurring: "M,TU,W,TH,F"
+      startTime: "09:00:00"
+      endTime: "17:00:00"
+      startHPAConfig:
+        minReplicas: 3
+        maxReplicas: 10
+        desiredReplicas: 5
+      endHPAConfig:
+        minReplicas: 1
+        maxReplicas: 3
+        desiredReplicas: 1
+    - name: weekend-minimal
+      timezone: "America/Los_Angeles"
+      interval:
+        recurring: "SAT,SUN"
+      startTime: "00:00:00"
+      endTime: "23:59:59"
+      startHPAConfig:
+        minReplicas: 1
+        maxReplicas: 2
+        desiredReplicas: 1
+      endHPAConfig:
+        minReplicas: 1
+        maxReplicas: 1
+        desiredReplicas: 1
+    - name: offpeak-hours
+      timezone: "America/Los_Angeles"
+      interval:
+        recurring: "M,TU,W,TH,F"
+      startTime: "17:00:00"
+      endTime: "09:00:00"
+      startHPAConfig:
+        minReplicas: 1
+        maxReplicas: 4
+        desiredReplicas: 2
+      endHPAConfig:
+        minReplicas: 1
+        maxReplicas: 3
+        desiredReplicas: 1

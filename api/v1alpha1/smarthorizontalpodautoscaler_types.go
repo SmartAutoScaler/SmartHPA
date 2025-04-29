@@ -48,13 +48,12 @@ type HPAConfig struct {
 }
 
 type Interval struct {
-	Timezone  string `json:"timezone,omitempty" protobuf:"bytes,1,opt,name=timezone"`
-	Recurring string `json:"recurring,omitempty" protobuf:"bytes,2,opt,name=recurring"`
-	StartDate string `json:"startDate,omitempty" protobuf:"bytes,3,opt,name=startDate"`
-	EndDate   string `json:"endDate,omitempty" protobuf:"bytes,4,opt,name=endDate"`
+	Recurring string `json:"recurring,omitempty" protobuf:"bytes,1,opt,name=recurring"`
+	StartDate string `json:"startDate,omitempty" protobuf:"bytes,2,opt,name=startDate"`
+	EndDate   string `json:"endDate,omitempty" protobuf:"bytes,3,opt,name=endDate"`
 }
 
-func (i *Interval) NeedRecurring() bool {
+func (i *Trigger) NeedRecurring() bool {
 	// Load timezone, default to UTC if not specified or invalid
 	loc, err := time.LoadLocation(i.Timezone)
 	if err != nil {
@@ -63,19 +62,19 @@ func (i *Interval) NeedRecurring() bool {
 
 	// Get current time in the specified timezone
 	now := time.Now().In(loc)
-	if i.Recurring != "" {
+	if i.Interval.Recurring != "" {
 		// Convert current weekday to short form
 		currentDay := WeekdayShort[now.Weekday()]
 		// Check if current day is in the recurring schedule
-		return strings.Contains(i.Recurring, currentDay)
+		return strings.Contains(i.Interval.Recurring, currentDay)
 	}
 
 	// Parse start and end dates
-	start, err := time.Parse(time.DateOnly, i.StartDate)
+	start, err := time.Parse(time.DateOnly, i.Interval.StartDate)
 	if err != nil {
 		return false
 	}
-	end, err := time.Parse(time.DateOnly, i.EndDate)
+	end, err := time.Parse(time.DateOnly, i.Interval.EndDate)
 	if err != nil {
 		return false
 	}
@@ -84,17 +83,19 @@ func (i *Interval) NeedRecurring() bool {
 	start = start.In(loc)
 	end = end.In(loc)
 
-	return now.After(start) && now.Before(end) && i.Recurring != ""
+	return now.After(start) && now.Before(end) && i.Interval.Recurring != ""
 }
 
 type Trigger struct {
 	Name           string     `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
-	Interval       *Interval  `json:"interval,omitempty" protobuf:"bytes,2,opt,name=interval"`
-	StartTime      string     `json:"startTime,omitempty" protobuf:"bytes,3,opt,name=startTime"`
-	EndTime        string     `json:"endTime,omitempty" protobuf:"bytes,4,opt,name=endTime"`
-	StartHPAConfig *HPAConfig `json:"startHPAConfig,omitempty" protobuf:"bytes,5,opt,name=startHPAConfig"`
-	EndHPAConfig   *HPAConfig `json:"endHPAConfig,omitempty" protobuf:"bytes,6,opt,name=endHPAConfig"`
-	Suspend        bool       `json:"suspend,omitempty" protobuf:"bytes,7,opt,name=suspend"`
+	Priority       *int       `json:"priority,omitempty" protobuf:"varint,2,opt,name=priority"`
+	Timezone       string     `json:"timezone,omitempty" protobuf:"bytes,3,opt,name=timezone"`
+	Interval       *Interval  `json:"interval,omitempty" protobuf:"bytes,4,opt,name=interval"`
+	StartTime      string     `json:"startTime,omitempty" protobuf:"bytes,5,opt,name=startTime"`
+	EndTime        string     `json:"endTime,omitempty" protobuf:"bytes,6,opt,name=endTime"`
+	StartHPAConfig *HPAConfig `json:"startHPAConfig,omitempty" protobuf:"bytes,7,opt,name=startHPAConfig"`
+	EndHPAConfig   *HPAConfig `json:"endHPAConfig,omitempty" protobuf:"bytes,8,opt,name=endHPAConfig"`
+	Suspend        bool       `json:"suspend,omitempty" protobuf:"bytes,8,opt,name=suspend"`
 	//+kubebuilder:validation:Pattern=^([0-1][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$
 }
 
@@ -106,12 +107,17 @@ type CurrentTrigger struct {
 	Name      string     `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
 	HPAConfig *HPAConfig `json:"HPAConfig,omitempty" protobuf:"bytes,2,opt,name=HPAConfig"`
 }
+type SmartRecommendation struct {
+	Enabled   bool `json:"enabled,omitempty" protobuf:"bytes,1,opt,name=enabled"`
+	Frequency *int `json:"frequency,omitempty" protobuf:"bytes,2,opt,name=frequency"`
+}
 
 // SmartHorizontalPodAutoscalerSpec defines the desired state of SmartHorizontalPodAutoscaler
 type SmartHorizontalPodAutoscalerSpec struct {
 	// HPASpecTemplate *HPASpecTemplate    `json:"HPASpecTemplate,omitempty" protobuf:"bytes,1,opt,name=HPASpecTemplate"`
-	HPAObjectRef *HPAObjectReference `json:"HPAObjectRef,omitempty" protobuf:"bytes,2,opt,name=HPAObjectRef"`
-	Triggers     Triggers            `json:"triggers,omitempty" protobuf:"bytes,3,opt,name=triggers"`
+	SmartRecommendation *SmartRecommendation `json:"smartRecommendation,omitempty" protobuf:"bytes,1,opt,name=smartRecommendation"`
+	HPAObjectRef        *HPAObjectReference  `json:"HPAObjectRef,omitempty" protobuf:"bytes,2,opt,name=HPAObjectRef"`
+	Triggers            Triggers             `json:"triggers,omitempty" protobuf:"bytes,3,opt,name=triggers"`
 }
 
 // SmartHorizontalPodAutoscalerStatus defines the observed state of SmartHorizontalPodAutoscaler

@@ -1,0 +1,82 @@
+apiVersion: autoscaling.sarabala.io/v1alpha1
+kind: SmartHorizontalPodAutoscaler
+metadata:
+  name: production-smart-hpa
+  namespace: default
+  labels:
+    app: production-app
+    environment: production
+spec:
+  smartRecommendation:
+    enabled: true
+    frequency: 30  # frequency in minutes
+  HPAObjectRef:
+    namespace: default
+    name: production-hpa
+  triggers:
+    - name: business-hours
+      priority: 100  # highest priority
+      timezone: "America/Los_Angeles"
+      interval:
+        recurring: "M,TU,W,TH,F"
+        startDate: "2025-04-24"
+        endDate: "2025-12-31"
+      startTime: "09:00:00"
+      endTime: "17:00:00"
+      startHPAConfig:
+        minReplicas: 5
+        maxReplicas: 15
+        desiredReplicas: 8
+      endHPAConfig:
+        minReplicas: 2
+        maxReplicas: 5
+        desiredReplicas: 3
+      suspend: false
+    - name: offpeak-hours
+      priority: 50  # medium priority
+      timezone: "America/Los_Angeles"
+      interval:
+        recurring: "M,TU,W,TH,F"
+      startTime: "17:00:00"
+      endTime: "09:00:00"
+      startHPAConfig:
+        minReplicas: 2
+        maxReplicas: 6
+        desiredReplicas: 3
+      endHPAConfig:
+        minReplicas: 1
+        maxReplicas: 4
+        desiredReplicas: 2
+      suspend: false
+    - name: weekend-hours
+      priority: 25  # lower priority
+      timezone: "America/Los_Angeles"
+      interval:
+        recurring: "SAT,SUN"
+      startTime: "00:00:00"
+      endTime: "23:59:59"
+      startHPAConfig:
+        minReplicas: 1
+        maxReplicas: 3
+        desiredReplicas: 2
+      endHPAConfig:
+        minReplicas: 1
+        maxReplicas: 2
+        desiredReplicas: 1
+      suspend: false
+status:
+  conditions:
+    - type: Available
+      status: "True"
+      lastTransitionTime: "2025-04-24T16:10:24Z"
+      reason: SmartHPAAvailable
+      message: "SmartHPA is available and managing the target HPA"
+  HPAObjectRef:
+    namespace: default
+    name: production-hpa
+  triggers:
+    - name: business-hours
+      HPAConfig:
+        minReplicas: 5
+        maxReplicas: 15
+        desiredReplicas: 8

@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -50,13 +52,55 @@ type SmartHorizontalPodAutoscalerReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *SmartHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Fetch the SmartHorizontalPodAutoscaler instance
+	smartHPA := &autoscalingv1alpha1.SmartHorizontalPodAutoscaler{}
+	if err := r.Get(ctx, req.NamespacedName, smartHPA); err != nil {
+		logger.Error(err, "unable to fetch SmartHorizontalPodAutoscaler")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	// TODO(user): your logic here
+	// Fetch the referenced HPA
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+	hpaName := types.NamespacedName{
+		Name:      smartHPA.Spec.HPAObjectRef.Name,
+		Namespace: smartHPA.Spec.HPAObjectRef.Namespace,
+	}
+	if err := r.Get(ctx, hpaName, hpa); err != nil {
+		// Update status condition to reflect error
+		condition := metav1.Condition{
+			Type:               "Error",
+			Status:             metav1.ConditionTrue,
+			Reason:             "HPANotFound",
+			Message:            "Referenced HPA not found",
+			LastTransitionTime: metav1.Now(),
+		}
+		smartHPA.Status.Conditions = []metav1.Condition{condition}
+		if err := r.Status().Update(ctx, smartHPA); err != nil {
+			logger.Error(err, "unable to update SmartHPA status")
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Update status to reflect successful reconciliation
+	condition := metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "Reconciled",
+		Message:            "SmartHPA reconciled successfully",
+		LastTransitionTime: metav1.Now(),
+	}
+	smartHPA.Status.Conditions = []metav1.Condition{condition}
+	if err := r.Status().Update(ctx, smartHPA); err != nil {
+		logger.Error(err, "unable to update SmartHPA status")
+		return ctrl.Result{}, err
+	}
+
+	// Enqueue for scheduling
 	r.queue <- req.NamespacedName
 	klog.Infof("Enqueued SmartHPA %s", req.NamespacedName)
+
 	return ctrl.Result{}, nil
 }
 

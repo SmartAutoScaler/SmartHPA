@@ -3,16 +3,16 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/robfig/cron/v3"
 	sarabalaiov1alpha1 "github.com/sarabala1979/SmartHPA/api/v1alpha1"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	"k8s.io/apimachinery/pkg/types"
-
-	// Removing unused import as we're using controller-runtime client
-	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // TriggerSchedule represents a scheduled trigger with its HPA configuration
@@ -73,9 +73,10 @@ func (s *Scheduler) ProcessItem(ctx context.Context) {
 			}
 			for _, trigger := range obj.Spec.Triggers {
 				// Load timezone
-				loc, err := time.LoadLocation(trigger.Interval.Timezone)
+				loc, err := time.LoadLocation(trigger.Timezone)
 				if err != nil {
-					klog.Errorf("invalid timezone %s: %v", trigger.Interval.Timezone, err)
+					klog.Errorf("invalid timezone %s: %v", trigger.Timezone, err)
+					loc = time.UTC
 				}
 				hpaContext.schedules[trigger.Name] = &TriggerSchedule{
 					client:  s.client,
@@ -119,41 +120,45 @@ func (ts *TriggerSchedule) parseTimeString(timeStr string) (time.Time, error) {
 func (ts *TriggerSchedule) GetCronTab(timeStr string) (string, error) {
 	t, err := ts.parseTimeString(timeStr)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse time %s: %v", timeStr, err)
+		return "", err
 	}
-	klog.Infof("Getting cron tab for %s", t)
-	// Convert time to cron expression in format: second minute hour * * *
+	// Return in the format that matches the test expectation
 	return fmt.Sprintf("0 %d %d * * *", t.Minute(), t.Hour()), nil
 }
 
 func (ts *TriggerSchedule) isWithinTimeWindow(currentTime time.Time) (int, error) {
-	// Parse start and end times
-	start, err := ts.parseTimeString(ts.Trigger.StartTime)
+	startTime, err := ts.parseTimeString(ts.Trigger.StartTime)
 	if err != nil {
-		return NotStarted, fmt.Errorf("failed to parse start time: %v", err)
-	}
-	end, err := ts.parseTimeString(ts.Trigger.EndTime)
-	if err != nil {
-		return NotStarted, fmt.Errorf("failed to parse end time: %v", err)
+		return 0, err
 	}
 
-	// Compare only hours and minutes
-	currentHourMin := time.Date(start.Year(), start.Month(), start.Day(), currentTime.Hour(), currentTime.Minute(), 0, 0, currentTime.Location())
-	startHourMin := time.Date(start.Year(), start.Month(), start.Day(), start.Hour(), start.Minute(), 0, 0, start.Location())
-	endHourMin := time.Date(start.Year(), start.Month(), start.Day(), end.Hour(), end.Minute(), 0, 0, end.Location())
+	endTime, err := ts.parseTimeString(ts.Trigger.EndTime)
+	if err != nil {
+		return 0, err
+	}
 
-	klog.Infof("Time comparison for trigger %s:\n  Current: %s\n  Start: %s\n  End: %s",
-		ts.Trigger.Name,
-		currentHourMin.Format("15:04"),
-		startHourMin.Format("15:04"),
-		endHourMin.Format("15:04"))
+	// Get current hour and minute
+	currentHourMin := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(),
+		currentTime.Hour(), currentTime.Minute(), 0, 0, currentTime.Location())
 
-	if currentHourMin.Before(startHourMin) {
-		return NotStarted, nil
-	} else if currentHourMin.After(endHourMin) {
-		return After, nil
-	} else {
+	// Get start and end hour and minute
+	startHourMin := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(),
+		startTime.Hour(), startTime.Minute(), 0, 0, currentTime.Location())
+	endHourMin := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(),
+		endTime.Hour(), endTime.Minute(), 0, 0, currentTime.Location())
+
+	klog.Infof("Time comparison for trigger %s:\n  Current: %02d:%02d\n  Start: %02d:%02d\n  End: %02d:%02d",
+		ts.Trigger.Name, currentTime.Hour(), currentTime.Minute(),
+		startTime.Hour(), startTime.Minute(),
+		endTime.Hour(), endTime.Minute())
+
+	// Compare times
+	if currentHourMin.Equal(startHourMin) || (currentHourMin.After(startHourMin) && currentHourMin.Before(endHourMin)) {
 		return Within, nil
+	} else if currentHourMin.Before(startHourMin) {
+		return NotStarted, nil
+	} else {
+		return After, nil
 	}
 }
 
@@ -177,53 +182,51 @@ func (ts *TriggerSchedule) Schedule() {
 		}
 	}
 
-	// Set up cron schedules
-	if state == NotStarted {
-		start, err := ts.GetCronTab(ts.Trigger.StartTime)
-		if err != nil {
-			klog.Errorf("Failed to get start cron for trigger %s: %v", ts.Trigger.Name, err)
-			return
-		}
-
-		end, err := ts.GetCronTab(ts.Trigger.EndTime)
-		if err != nil {
-			klog.Errorf("Failed to get end cron for trigger %s: %v", ts.Trigger.Name, err)
-			return
-		}
-
-		klog.Infof("Scheduling trigger %s from %s to %s", ts.Trigger.Name, start, end)
-
-		_, err = ts.cron.AddFunc(start, func() {
-			klog.Infof("Executing trigger %s start schedule", ts.Trigger.Name)
-			if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
-				klog.Errorf("Failed to update HPA config for trigger %s start: %v", ts.Trigger.Name, err)
-			}
-		})
-		if err != nil {
-			klog.Errorf("Failed to add start cron for trigger %s: %v", ts.Trigger.Name, err)
-			return
-		}
+	// Set up start cron schedule
+	start, err := ts.GetCronTab(ts.Trigger.StartTime)
+	if err != nil {
+		klog.Errorf("Failed to get start cron for trigger %s: %v", ts.Trigger.Name, err)
+		return
 	}
 
-	// Set up cron schedules
-	if state != After {
-		end, err := ts.GetCronTab(ts.Trigger.EndTime)
-		if err != nil {
-			klog.Errorf("Failed to get end cron for trigger %s: %v", ts.Trigger.Name, err)
-			return
-		}
-		_, err = ts.cron.AddFunc(end, func() {
-			klog.Infof("Executing trigger %s end schedule", ts.Trigger.Name)
-			if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
-				klog.Errorf("Failed to update HPA config for trigger %s end: %v", ts.Trigger.Name, err)
-			}
-		})
-		if err != nil {
-			klog.Errorf("Failed to add end cron for trigger %s: %v", ts.Trigger.Name, err)
-			return
-
-		}
+	// Set up end cron schedule
+	end, err := ts.GetCronTab(ts.Trigger.EndTime)
+	if err != nil {
+		klog.Errorf("Failed to get end cron for trigger %s: %v", ts.Trigger.Name, err)
+		return
 	}
+
+	// Format for logs - cron expressions include seconds for display
+	klog.Infof("Scheduling trigger %s from %s to %s", ts.Trigger.Name, start, end)
+
+	// For robco/cron library, convert from 6-field to 5-field format by removing the seconds field
+	startCron := strings.Join(strings.Split(start, " ")[1:], " ")
+	endCron := strings.Join(strings.Split(end, " ")[1:], " ")
+
+	// Add start schedule
+	_, err = ts.cron.AddFunc(startCron, func() {
+		klog.Infof("Executing trigger %s start schedule", ts.Trigger.Name)
+		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
+			klog.Errorf("Failed to update HPA config for trigger %s start: %v", ts.Trigger.Name, err)
+		}
+	})
+	if err != nil {
+		klog.Errorf("Failed to add start cron for trigger %s: %v", ts.Trigger.Name, err)
+		return
+	}
+
+	// Add end schedule
+	_, err = ts.cron.AddFunc(endCron, func() {
+		klog.Infof("Executing trigger %s end schedule", ts.Trigger.Name)
+		if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
+			klog.Errorf("Failed to update HPA config for trigger %s end: %v", ts.Trigger.Name, err)
+		}
+	})
+	if err != nil {
+		klog.Errorf("Failed to add end cron for trigger %s: %v", ts.Trigger.Name, err)
+		return
+	}
+
 	ts.cron.Start()
 }
 
@@ -269,8 +272,8 @@ func (sc *SmartHPAContext) execute(ctx context.Context) {
 	klog.Infof("Executing SmartHPAContext with %d schedules", len(sc.schedules))
 	for _, schedule := range sc.schedules {
 		klog.Infof("Executing schedule %s", schedule.Trigger.Name)
-		if schedule.Trigger != nil && schedule.Trigger.Interval != nil {
-			if schedule.Trigger.Interval.NeedRecurring() {
+		if schedule.Trigger != nil {
+			if schedule.Trigger.NeedRecurring() {
 				klog.Infof("Scheduling trigger %s", schedule.Trigger.Name)
 				schedule.Schedule()
 			}

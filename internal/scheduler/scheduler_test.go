@@ -56,6 +56,63 @@ func TestParseTimeString(t *testing.T) {
 	}
 }
 
+func TestSchedule_WithRecurring(t *testing.T) {
+	// Create a fake client with an existing HPA
+	minReplicas := int32(1)
+	maxReplicas := int32(5)
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-hpa",
+			Namespace: "default",
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			MinReplicas: &minReplicas,
+			MaxReplicas: maxReplicas,
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				Kind:       "Deployment",
+				Name:       "test-app",
+				APIVersion: "apps/v1",
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithObjects(hpa).Build()
+
+	trigger := &sarabalaiov1alpha1.Trigger{
+		Name:      "business-hours",
+		StartTime: "09:00:00",
+		EndTime:   "17:00:00",
+		Timezone:  "UTC",
+		Interval: &sarabalaiov1alpha1.Interval{
+			Recurring: "M,TU,W,TH,F",
+		},
+		StartHPAConfig: &sarabalaiov1alpha1.HPAConfig{
+			MinReplicas: &minReplicas,
+			MaxReplicas: &maxReplicas,
+		},
+		EndHPAConfig: &sarabalaiov1alpha1.HPAConfig{
+			MinReplicas: &minReplicas,
+			MaxReplicas: &maxReplicas,
+		},
+	}
+
+	ts := &TriggerSchedule{
+		client: client,
+		HPANamespacedName: types.NamespacedName{
+			Name:      "test-hpa",
+			Namespace: "default",
+		},
+		Trigger: trigger,
+		cron:    cron.New(),
+	}
+
+	ts.Schedule()
+
+	// Verify cron jobs were set up correctly
+	assert.NotNil(t, ts.cron)
+	assert.Equal(t, 2, len(ts.cron.Entries()))
+}
+
 func TestGetCronTab(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -88,6 +145,20 @@ func TestGetCronTab(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestCreateSmartHPAContext(t *testing.T) {
+	client := fake.NewClientBuilder().Build()
+	ctx := &SmartHPAContext{
+		client:    client,
+		schedules: make(map[string]*TriggerSchedule),
+		cron:      cron.New(),
+	}
+
+	assert.NotNil(t, ctx)
+	assert.Equal(t, client, ctx.client)
+	assert.NotNil(t, ctx.schedules)
+	assert.NotNil(t, ctx.cron)
 }
 
 func TestIsWithinTimeWindow(t *testing.T) {
@@ -127,15 +198,20 @@ func TestIsWithinTimeWindow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Use a fixed date to ensure consistent comparison
+			// Parse the current time
+			currentTime, _ := time.Parse("15:04:05", tt.currentTime)
+
+			// Create a fixed date for testing
 			baseTime := time.Date(2025, 4, 23, 0, 0, 0, 0, time.UTC)
-			current, _ := time.Parse("15:04:05", tt.currentTime)
-			currentTime := time.Date(baseTime.Year(), baseTime.Month(), baseTime.Day(), current.Hour(), current.Minute(), current.Second(), 0, baseTime.Location())
+			currentTime = time.Date(baseTime.Year(), baseTime.Month(), baseTime.Day(),
+				currentTime.Hour(), currentTime.Minute(), currentTime.Second(), 0, baseTime.Location())
 
 			ts := &TriggerSchedule{
 				Trigger: &sarabalaiov1alpha1.Trigger{
 					StartTime: tt.startTime,
 					EndTime:   tt.endTime,
+					Timezone:  "UTC",
+					Interval:  &sarabalaiov1alpha1.Interval{},
 				},
 			}
 			got, err := ts.isWithinTimeWindow(currentTime)
@@ -328,8 +404,8 @@ func TestSmartHPAContextExecute(t *testing.T) {
 				Name:      "test-trigger",
 				StartTime: "09:00:00",
 				EndTime:   "17:00:00",
+				Timezone:  "America/Los_Angeles",
 				Interval: &sarabalaiov1alpha1.Interval{
-					Timezone:  "America/Los_Angeles",
 					Recurring: "M,TU,W,TH,F",
 				},
 				StartHPAConfig: &sarabalaiov1alpha1.HPAConfig{

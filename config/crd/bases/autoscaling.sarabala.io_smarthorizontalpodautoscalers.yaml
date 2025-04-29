@@ -42,13 +42,20 @@ spec:
               of SmartHorizontalPodAutoscaler
             properties:
               HPAObjectRef:
-                description: HPASpecTemplate *HPASpecTemplate    `json:"HPASpecTemplate,omitempty"
-                  protobuf:"bytes,1,opt,name=HPASpecTemplate"`
                 properties:
                   name:
                     type: string
                   namespace:
                     type: string
+                type: object
+              smartRecommendation:
+                description: HPASpecTemplate *HPASpecTemplate    `json:"HPASpecTemplate,omitempty"
+                  protobuf:"bytes,1,opt,name=HPASpecTemplate"`
+                properties:
+                  enabled:
+                    type: boolean
+                  frequency:
+                    type: integer
                 type: object
               triggers:
                 items:
@@ -75,11 +82,11 @@ spec:
                           type: string
                         startDate:
                           type: string
-                        timezone:
-                          type: string
                       type: object
                     name:
                       type: string
+                    priority:
+                      type: integer
                     startHPAConfig:
                       properties:
                         desiredReplicas:
@@ -96,6 +103,8 @@ spec:
                       type: string
                     suspend:
                       type: boolean
+                    timezone:
+                      type: string
                   type: object
                 type: array
             type: object
@@ -195,11 +204,11 @@ spec:
                           type: string
                         startDate:
                           type: string
-                        timezone:
-                          type: string
                       type: object
                     name:
                       type: string
+                    priority:
+                      type: integer
                     startHPAConfig:
                       properties:
                         desiredReplicas:
@@ -216,6 +225,8 @@ spec:
                       type: string
                     suspend:
                       type: boolean
+                    timezone:
+                      type: string
                   type: object
                 type: array
             type: object

@@ -84,9 +84,9 @@ var _ = Describe("SmartHorizontalPodAutoscaler Controller", func() {
 							Name:      "business-hours",
 							StartTime: "09:00:00",
 							EndTime:   "17:00:00",
+							Timezone:  "America/Los_Angeles",
 							Interval: &autoscalingv1alpha1.Interval{
 								Recurring: "M,TU,W,TH,F",
-								Timezone:  "America/Los_Angeles",
 							},
 							StartHPAConfig: &autoscalingv1alpha1.HPAConfig{
 								MinReplicas:     &minReplicas,
@@ -121,10 +121,24 @@ var _ = Describe("SmartHorizontalPodAutoscaler Controller", func() {
 		Context("Basic reconciliation", func() {
 			It("should successfully reconcile the resource", func() {
 				By("Reconciling the created resource")
+				queue := make(chan types.NamespacedName, 100)
 				controllerReconciler := &SmartHorizontalPodAutoscalerReconciler{
 					Client: k8sClient,
 					Scheme: k8sClient.Scheme(),
+					queue:  queue,
 				}
+
+				// Start a goroutine to consume from the queue
+				go func() {
+					for {
+						select {
+						case <-queue:
+							// Just consume the items
+						case <-ctx.Done():
+							return
+						}
+					}
+				}()
 
 				By("Setting test timeouts")
 				SetDefaultEventuallyTimeout(10 * time.Second)
@@ -155,10 +169,24 @@ var _ = Describe("SmartHorizontalPodAutoscaler Controller", func() {
 				Expect(k8sClient.Delete(ctx, hpa)).To(Succeed())
 
 				By("Reconciling the resource")
+				queue := make(chan types.NamespacedName, 100)
 				controllerReconciler := &SmartHorizontalPodAutoscalerReconciler{
 					Client: k8sClient,
 					Scheme: k8sClient.Scheme(),
+					queue:  queue,
 				}
+
+				// Start a goroutine to consume from the queue
+				go func() {
+					for {
+						select {
+						case <-queue:
+							// Just consume the items
+						case <-ctx.Done():
+							return
+						}
+					}
+				}()
 
 				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 					NamespacedName: typeNamespacedName,
