@@ -27,63 +27,57 @@ You can also use specific version tags like `v1.0.0` or `v1.0`.
 ## Getting Started
 
 ### Prerequisites
+- Kubernetes cluster v1.11.3+
+- kubectl version v1.11.3+
+
+### Quick Installation
+
+To quickly install SmartHPA in your cluster:
+
+```sh
+kubectl apply -f install.yaml
+```
+
+This will install:
+- SmartHPA Custom Resource Definition (CRD)
+- RBAC configurations (ServiceAccount, ClusterRole, ClusterRoleBinding)
+- SmartHPA controller deployment
+
+### Development Setup
+
+If you want to build from source or contribute to SmartHPA, you'll need:
 - go version v1.22.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- docker version 17.03+
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+**Build and push your image:**
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/smarthpa:tag
+make docker-build docker-push IMG=<registry>/smarthpa:<tag>
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
+**Deploy to cluster:**
 
 ```sh
-make install
+make deploy IMG=<registry>/smarthpa:<tag>
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
-```sh
-make deploy IMG=<some-registry>/smarthpa:tag
-```
-
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+**Try out the examples:**
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+### Uninstallation
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
+**Using install.yaml:**
 ```sh
-kubectl delete -k config/samples/
+kubectl delete -f install.yaml
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
+**For development setup:**
 ```sh
 make undeploy
+make uninstall
 ```
 
 ## Project Distribution

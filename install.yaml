@@ -1,0 +1,223 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.1
+  name: smarthorizontalpodautoscalers.autoscaling.sarabala.io
+spec:
+  group: autoscaling.sarabala.io
+  names:
+    kind: SmartHorizontalPodAutoscaler
+    listKind: SmartHorizontalPodAutoscalerList
+    plural: smarthorizontalpodautoscalers
+    singular: smarthorizontalpodautoscaler
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: SmartHorizontalPodAutoscaler is the Schema for the smarthorizontalpodautoscalers API
+        properties:
+          apiVersion:
+            description: APIVersion defines the versioned schema of this representation of an object.
+            type: string
+          kind:
+            description: Kind is a string value representing the REST resource this object represents.
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SmartHorizontalPodAutoscalerSpec defines the desired state of SmartHorizontalPodAutoscaler
+            properties:
+              HPAObjectRef:
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                type: object
+              smartRecommendation:
+                properties:
+                  enabled:
+                    type: boolean
+                  frequency:
+                    type: integer
+                type: object
+              triggers:
+                items:
+                  properties:
+                    endHPAConfig:
+                      properties:
+                        desiredReplicas:
+                          format: int32
+                          type: integer
+                        maxReplicas:
+                          format: int32
+                          type: integer
+                        minReplicas:
+                          format: int32
+                          type: integer
+                      type: object
+                    endTime:
+                      type: string
+                    interval:
+                      properties:
+                        endDate:
+                          type: string
+                        recurring:
+                          type: string
+                        startDate:
+                          type: string
+                      type: object
+                    name:
+                      type: string
+                    priority:
+                      type: integer
+                    startHPAConfig:
+                      properties:
+                        desiredReplicas:
+                          format: int32
+                          type: integer
+                        maxReplicas:
+                          format: int32
+                          type: integer
+                        minReplicas:
+                          format: int32
+                          type: integer
+                      type: object
+                    startTime:
+                      type: string
+                    suspend:
+                      type: boolean
+                    timezone:
+                      type: string
+                  type: object
+                type: array
+            type: object
+          status:
+            description: SmartHorizontalPodAutoscalerStatus defines the observed state of SmartHorizontalPodAutoscaler
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: smarthpa
+    app.kubernetes.io/managed-by: kustomize
+  name: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - autoscaling.sarabala.io
+  resources:
+  - smarthorizontalpodautoscalers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - autoscaling.sarabala.io
+  resources:
+  - smarthorizontalpodautoscalers/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - autoscaling.sarabala.io
+  resources:
+  - smarthorizontalpodautoscalers/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller-manager
+  namespace: system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: manager-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: smarthpa
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - command:
+        - /manager
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        image: sarabala.io/smarthpa:v0.0.1
+        name: manager
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10

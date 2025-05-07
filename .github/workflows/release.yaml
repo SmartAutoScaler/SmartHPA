@@ -1,9 +1,7 @@
-name: Release to Quay.io
+name: Release SmartHPA
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
@@ -71,15 +69,25 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Generate release artifacts
+    - name: Update install.yaml with release image
       run: |
-        make build-installer IMG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        VERSION=${GITHUB_REF#refs/tags/}
+        sed -i "s|image: sarabala.io/smarthpa:v0.0.1|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}|g" install.yaml
 
-    - name: Upload release artifacts
-      if: github.event_name == 'release'
+    - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
       with:
+        name: Release ${{ github.ref_name }}
+        body: |
+          ## SmartHPA ${{ github.ref_name }}
+          
+          ### Installation
+          ```bash
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
+          ```
         files: |
-          dist/install.yaml
+          install.yaml
+        draft: false
+        prerelease: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
