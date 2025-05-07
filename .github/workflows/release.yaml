@@ -10,7 +10,7 @@ on:
 
 env:
   REGISTRY: quay.io
-  IMAGE_NAME: sarabala1979/smarthpa
+  IMAGE_NAME: sarabala1979/smartautoscaler/smarthpa
 
 jobs:
   build-and-push:
