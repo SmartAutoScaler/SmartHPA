@@ -37,17 +37,47 @@ type SmartHPAContext struct {
 
 // Scheduler manages the scheduling of HPA configurations
 type Scheduler struct {
-	client   client.Client
-	contexts map[types.NamespacedName]*SmartHPAContext // key: namespace/nam
-	queue    chan types.NamespacedName
+	client        client.Client
+	contexts      map[types.NamespacedName]*SmartHPAContext // key: namespace/nam
+	queue         chan types.NamespacedName
+	DeletionQueue chan types.NamespacedName
 }
 
 // NewScheduler creates a new scheduler instance
-func NewScheduler(client client.Client, queue chan types.NamespacedName) *Scheduler {
+func NewScheduler(client client.Client, queue chan types.NamespacedName, deletionQueue chan types.NamespacedName) *Scheduler {
 	return &Scheduler{
-		contexts: make(map[types.NamespacedName]*SmartHPAContext),
-		client:   client,
-		queue:    queue,
+		contexts:      make(map[types.NamespacedName]*SmartHPAContext),
+		client:        client,
+		queue:         queue,
+		DeletionQueue: deletionQueue,
+	}
+}
+
+func (s *Scheduler) processDeletions(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			klog.Info("Deletion processing loop stopped.")
+			return
+		case item := <-s.DeletionQueue:
+			klog.Infof("Processing deletion for SmartHPA %s", item)
+			if hpaContext, exists := s.contexts[item]; exists {
+				klog.Infof("Stopping cron schedulers for SmartHPA %s", item)
+				// Stop individual trigger cron jobs
+				for name, schedule := range hpaContext.schedules {
+					klog.Infof("Stopping cron for trigger %s in SmartHPA %s", name, item)
+					schedule.cron.Stop() // Stop the cron scheduler for the specific trigger
+				}
+				// Stop the main cron for the SmartHPAContext (which handles daily refresh)
+				klog.Infof("Stopping main cron for SmartHPAContext %s", item)
+				hpaContext.cron.Stop()
+
+				delete(s.contexts, item) // Remove from map
+				klog.Infof("Cleaned up context for SmartHPA %s", item)
+			} else {
+				klog.Warningf("Context for SmartHPA %s not found for deletion", item)
+			}
+		}
 	}
 }
 
@@ -96,10 +126,13 @@ func (s *Scheduler) ProcessItem(ctx context.Context) {
 }
 
 // Start starts the scheduler
-func (s *Scheduler) Start() {
-	for i := 0; i < 10; i++ {
-		go s.ProcessItem(context.Background())
+func (s *Scheduler) Start(ctx context.Context) {
+	for i := 0; i < 10; i++ { // Number of workers for processing items from r.queue
+		go s.ProcessItem(ctx)
 	}
+	// Start a single worker for processing items from DeletionQueue
+	go s.processDeletions(ctx)
+	klog.Info("Scheduler started with item processing and deletion processing workers")
 }
 
 func (ts *TriggerSchedule) parseTimeString(timeStr string) (time.Time, error) {
@@ -113,8 +146,17 @@ func (ts *TriggerSchedule) parseTimeString(timeStr string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid time format: %v", err)
 	}
 	// Use current date with the parsed time
-	now := time.Now()
-	return time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), t.Second(), 0, now.Location()), nil
+	nowInTriggerTimezone := time.Now().In(ts.cron.Location())
+	return time.Date(
+		nowInTriggerTimezone.Year(),
+		nowInTriggerTimezone.Month(),
+		nowInTriggerTimezone.Day(),
+		t.Hour(),
+		t.Minute(),
+		t.Second(),
+		0,
+		ts.cron.Location(), // Use the location from the cron instance
+	), nil
 }
 
 func (ts *TriggerSchedule) GetCronTab(timeStr string) (string, error) {
@@ -137,18 +179,23 @@ func (ts *TriggerSchedule) isWithinTimeWindow(currentTime time.Time) (int, error
 		return 0, err
 	}
 
-	// Get current hour and minute
-	currentHourMin := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(),
-		currentTime.Hour(), currentTime.Minute(), 0, 0, currentTime.Location())
+	// Convert currentTime to the trigger's timezone
+	currentTimeInTriggerTimezone := currentTime.In(ts.cron.Location())
 
-	// Get start and end hour and minute
-	startHourMin := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(),
-		startTime.Hour(), startTime.Minute(), 0, 0, currentTime.Location())
-	endHourMin := time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(),
-		endTime.Hour(), endTime.Minute(), 0, 0, currentTime.Location())
+	// Get current hour and minute in trigger's timezone
+	currentHourMin := time.Date(currentTimeInTriggerTimezone.Year(), currentTimeInTriggerTimezone.Month(), currentTimeInTriggerTimezone.Day(),
+		currentTimeInTriggerTimezone.Hour(), currentTimeInTriggerTimezone.Minute(), 0, 0, ts.cron.Location())
 
-	klog.Infof("Time comparison for trigger %s:\n  Current: %02d:%02d\n  Start: %02d:%02d\n  End: %02d:%02d",
-		ts.Trigger.Name, currentTime.Hour(), currentTime.Minute(),
+	// Get start and end hour and minute using date from currentTimeInTriggerTimezone and time from parsed start/end times
+	// startTime and endTime from parseTimeString should already be in ts.cron.Location()
+	startHourMin := time.Date(currentTimeInTriggerTimezone.Year(), currentTimeInTriggerTimezone.Month(), currentTimeInTriggerTimezone.Day(),
+		startTime.Hour(), startTime.Minute(), 0, 0, ts.cron.Location())
+	endHourMin := time.Date(currentTimeInTriggerTimezone.Year(), currentTimeInTriggerTimezone.Month(), currentTimeInTriggerTimezone.Day(),
+		endTime.Hour(), endTime.Minute(), 0, 0, ts.cron.Location())
+
+	klog.Infof("Time comparison for trigger %s (TZ: %s):\n  Current: %02d:%02d\n  Start: %02d:%02d\n  End: %02d:%02d",
+		ts.Trigger.Name, ts.cron.Location().String(),
+		currentTimeInTriggerTimezone.Hour(), currentTimeInTriggerTimezone.Minute(),
 		startTime.Hour(), startTime.Minute(),
 		endTime.Hour(), endTime.Minute())
 
@@ -162,7 +209,7 @@ func (ts *TriggerSchedule) isWithinTimeWindow(currentTime time.Time) (int, error
 	}
 }
 
-func (ts *TriggerSchedule) Schedule() {
+func (ts *TriggerSchedule) Schedule(ctx context.Context) {
 	klog.Infof("Scheduling trigger %s", ts.Trigger.Name)
 	klog.Infof("Trigger %s start time: %s", ts.Trigger.Name, ts.Trigger.StartTime)
 	klog.Infof("Trigger %s end time: %s", ts.Trigger.Name, ts.Trigger.EndTime)
@@ -177,7 +224,7 @@ func (ts *TriggerSchedule) Schedule() {
 	// Apply initial configuration based on current time
 	if state == Within {
 		klog.Infof("Current time is within window, applying start config for trigger %s", ts.Trigger.Name)
-		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
+		if err := ts.UpdateHPAConfig(ctx, *ts.Trigger.StartHPAConfig); err != nil {
 			klog.Errorf("Failed to apply start config for trigger %s: %v", ts.Trigger.Name, err)
 		}
 	}
@@ -206,7 +253,7 @@ func (ts *TriggerSchedule) Schedule() {
 	// Add start schedule
 	_, err = ts.cron.AddFunc(startCron, func() {
 		klog.Infof("Executing trigger %s start schedule", ts.Trigger.Name)
-		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
+		if err := ts.UpdateHPAConfig(ctx, *ts.Trigger.StartHPAConfig); err != nil {
 			klog.Errorf("Failed to update HPA config for trigger %s start: %v", ts.Trigger.Name, err)
 		}
 	})
@@ -218,7 +265,7 @@ func (ts *TriggerSchedule) Schedule() {
 	// Add end schedule
 	_, err = ts.cron.AddFunc(endCron, func() {
 		klog.Infof("Executing trigger %s end schedule", ts.Trigger.Name)
-		if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
+		if err := ts.UpdateHPAConfig(ctx, *ts.Trigger.EndHPAConfig); err != nil {
 			klog.Errorf("Failed to update HPA config for trigger %s end: %v", ts.Trigger.Name, err)
 		}
 	})
@@ -230,11 +277,11 @@ func (ts *TriggerSchedule) Schedule() {
 	ts.cron.Start()
 }
 
-func (ts *TriggerSchedule) UpdateHPAConfig(config sarabalaiov1alpha1.HPAConfig) error {
+func (ts *TriggerSchedule) UpdateHPAConfig(ctx context.Context, config sarabalaiov1alpha1.HPAConfig) error {
 	klog.Infof("Updating HPA %s with config %v", ts.HPANamespacedName.String(), config)
 	// Get the HPA object
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	err := ts.client.Get(context.Background(), ts.HPANamespacedName, hpa)
+	err := ts.client.Get(ctx, ts.HPANamespacedName, hpa)
 	klog.Infof("Got HPA %s", hpa.String())
 	if err != nil {
 		klog.Errorf("Failed to get HPA %s: %v", ts.HPANamespacedName.String(), err)
@@ -248,22 +295,18 @@ func (ts *TriggerSchedule) UpdateHPAConfig(config sarabalaiov1alpha1.HPAConfig) 
 	if config.MaxReplicas != nil {
 		hpa.Spec.MaxReplicas = *config.MaxReplicas
 	}
-	if config.DesiredReplicas != nil {
-		hpa.Status.DesiredReplicas = int32(*config.DesiredReplicas)
-	}
 
 	// Update the HPA object
-	err = ts.client.Update(context.Background(), hpa)
+	err = ts.client.Update(ctx, hpa)
 	if err != nil {
 		klog.Errorf("Failed to update HPA %s: %v", ts.HPANamespacedName.String(), err)
 		return err
 	}
 
-	klog.Infof("Successfully updated HPA %s with min=%v, max=%v, desired=%v",
+	klog.Infof("Successfully updated HPA %s spec with min=%v, max=%v",
 		ts.HPANamespacedName.String(),
 		hpa.Spec.MinReplicas,
-		hpa.Spec.MaxReplicas,
-		hpa.Status.DesiredReplicas)
+		hpa.Spec.MaxReplicas)
 
 	return nil
 }
@@ -275,7 +318,7 @@ func (sc *SmartHPAContext) execute(ctx context.Context) {
 		if schedule.Trigger != nil {
 			if schedule.Trigger.NeedRecurring() {
 				klog.Infof("Scheduling trigger %s", schedule.Trigger.Name)
-				schedule.Schedule()
+				schedule.Schedule(ctx)
 			}
 		}
 		// Add a recurring job to refresh the context
