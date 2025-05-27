@@ -144,6 +144,7 @@ spec:
     name: example-hpa
   triggers:
     - name: business-hours
+      priority: 10
       interval:
         timezone: "America/Los_Angeles"
         recurring: "M,TU,W,TH,F"
@@ -158,6 +159,7 @@ spec:
       startTime: "09:00:00"
       endTime: "18:00:00"
     - name: weekend-scale-down
+      priority: 5
       interval:
         timezone: "America/Los_Angeles"
         recurring: "SAT,SUN"
@@ -173,6 +175,12 @@ This configuration:
 - Scales up during business hours (9 AM to 6 PM Pacific Time) on weekdays
 - Maintains lower scaling limits during weekends
 - Automatically transitions between configurations based on the schedule
+
+### Priority Feature
+
+The `priority` field allows you to control which schedule takes effect when multiple schedules overlap. A schedule with a higher `priority` value will always take precedence over lower-priority schedules during overlapping periods. This makes it easy to configure short-term or one-off scaling events, such as for marketing campaigns or Black Friday sales, without disrupting your regular scaling logic.
+
+For example, if you add a trigger for a special event with a higher priority than your normal business-hours trigger, the special event's configuration will be applied during the overlap. Once the event ends, the system will automatically revert to the next highest-priority active schedule.
 
 ## Contributing
 
