@@ -76,7 +76,7 @@ jobs:
         retention-days: 90
 
     - name: Create Coverage Badge (Gist)
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push' && secrets.GIST_TOKEN != '' && secrets.GIST_ID != ''
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       continue-on-error: true
       uses: schneegans/dynamic-badges-action@v1.7.0
       with:
