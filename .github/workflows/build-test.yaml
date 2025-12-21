@@ -76,7 +76,8 @@ jobs:
         retention-days: 90
 
     - name: Create Coverage Badge (Gist)
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push' && secrets.GIST_TOKEN != '' && secrets.GIST_ID != ''
+      continue-on-error: true
       uses: schneegans/dynamic-badges-action@v1.7.0
       with:
         auth: ${{ secrets.GIST_TOKEN }}
@@ -85,6 +86,19 @@ jobs:
         label: coverage
         message: ${{ steps.coverage.outputs.coverage }}%
         color: ${{ steps.coverage.outputs.color }}
+    
+    - name: Coverage Badge Info
+      if: github.ref == 'refs/heads/main'
+      run: |
+        echo "📊 Coverage: ${{ steps.coverage.outputs.coverage }}%"
+        echo "🎨 Badge Color: ${{ steps.coverage.outputs.color }}"
+        if [ -z "${{ secrets.GIST_TOKEN }}" ] || [ -z "${{ secrets.GIST_ID }}" ]; then
+          echo "ℹ️  Note: GIST_TOKEN or GIST_ID not configured."
+          echo "   The coverage badge will not auto-update in README."
+          echo "   See docs/COVERAGE_BADGE_SETUP.md for setup instructions."
+        else
+          echo "✅ Coverage badge should be updated in Gist"
+        fi
 
     # - name: Setup Kind Cluster
     #   uses: helm/kind-action@v1.9.0

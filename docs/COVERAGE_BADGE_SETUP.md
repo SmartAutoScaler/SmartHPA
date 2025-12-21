@@ -2,6 +2,19 @@
 
 This guide explains how to set up the test coverage badge for SmartHPA using GitHub Actions and Shields.io.
 
+## 🚨 Troubleshooting: "404 Not Found" Error
+
+If you're seeing **"Error: Failed to get gist: 404 Not Found"** in GitHub Actions:
+
+**✅ Good News**: The workflow is configured to continue even if Gist setup fails. Your builds won't be blocked!
+
+**Quick Fixes**:
+1. **Option A (Easiest)**: Use Codecov badge (already works) or local tools (`make coverage`)
+2. **Option B (5 min setup)**: Follow the Gist setup steps below
+3. **See**: [Quick Start Guide](GIST_SETUP_QUICK_START.md) for detailed troubleshooting
+
+---
+
 ## Option 1: Using Codecov (Already Configured)
 
 Codecov is already integrated in the workflow. The badge will automatically update when you:
