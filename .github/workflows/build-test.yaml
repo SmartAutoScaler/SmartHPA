@@ -85,6 +85,10 @@ jobs:
         label: coverage
         message: ${{ steps.coverage.outputs.coverage }}%
         color: ${{ steps.coverage.outputs.color }}
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
 
     # - name: Setup Kind Cluster
     #   uses: helm/kind-action@v1.9.0
