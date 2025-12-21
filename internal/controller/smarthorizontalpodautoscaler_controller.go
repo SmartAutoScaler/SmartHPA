@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,7 @@ type SmartHorizontalPodAutoscalerReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling.sarabala.io,resources=smarthorizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling.sarabala.io,resources=smarthorizontalpodautoscalers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=autoscaling.sarabala.io,resources=smarthorizontalpodautoscalers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -57,30 +59,97 @@ func (r *SmartHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Context, 
 	// Fetch the SmartHorizontalPodAutoscaler instance
 	smartHPA := &autoscalingv1alpha1.SmartHorizontalPodAutoscaler{}
 	if err := r.Get(ctx, req.NamespacedName, smartHPA); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			// Resource was deleted, log it and return without error
+			logger.Info("SmartHorizontalPodAutoscaler was deleted, cleaning up",
+				"name", req.Name,
+				"namespace", req.Namespace)
+			return ctrl.Result{}, nil
+		}
 		logger.Error(err, "unable to fetch SmartHorizontalPodAutoscaler")
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{RequeueAfter: time.Second * 30}, client.IgnoreNotFound(err)
+	}
+
+	// Check if the resource is being deleted
+	if !smartHPA.DeletionTimestamp.IsZero() {
+		logger.Info("SmartHorizontalPodAutoscaler is being deleted, skipping reconciliation",
+			"name", req.Name,
+			"namespace", req.Namespace)
+		return ctrl.Result{}, nil
+	}
+
+	// --- New logic: Create HPA from HPASpecTemplate if present ---
+	if smartHPA.Spec.HPASpecTemplate != nil {
+		hpaName := smartHPA.Spec.HPASpecTemplate.Metadata.Name
+		hpaNamespace := smartHPA.Spec.HPASpecTemplate.Metadata.Namespace
+		if hpaNamespace == "" {
+			hpaNamespace = smartHPA.Namespace
+		}
+		if hpaName == "" {
+			hpaName = smartHPA.Name + "-generated"
+		}
+		// Check if HPA already exists
+		hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+		err := r.Get(ctx, types.NamespacedName{Name: hpaName, Namespace: hpaNamespace}, hpa)
+		if err != nil {
+			// HPA does not exist, create it
+			newHPA := &autoscalingv2.HorizontalPodAutoscaler{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        hpaName,
+					Namespace:   hpaNamespace,
+					Labels:      smartHPA.Spec.HPASpecTemplate.Metadata.Labels,
+					Annotations: smartHPA.Spec.HPASpecTemplate.Metadata.Annotations,
+				},
+				Spec: autoscalingv2.HorizontalPodAutoscalerSpec{},
+			}
+			// Copy spec fields from template
+			if smartHPA.Spec.HPASpecTemplate.Spec != nil {
+				if smartHPA.Spec.HPASpecTemplate.Spec.MinReplicas != nil {
+					newHPA.Spec.MinReplicas = smartHPA.Spec.HPASpecTemplate.Spec.MinReplicas
+				}
+				if smartHPA.Spec.HPASpecTemplate.Spec.MaxReplicas != nil {
+					newHPA.Spec.MaxReplicas = *smartHPA.Spec.HPASpecTemplate.Spec.MaxReplicas
+				}
+				// NOTE: Add more field mappings as needed for your use case
+			}
+			// Set owner reference
+			if err := ctrl.SetControllerReference(smartHPA, newHPA, r.Scheme); err != nil {
+				logger.Error(err, "unable to set owner reference on HPA")
+				return ctrl.Result{}, err
+			}
+			if err := r.Create(ctx, newHPA); err != nil {
+				logger.Error(err, "unable to create HPA from template")
+				return ctrl.Result{}, err
+			}
+			logger.Info("Created HPA from HPASpecTemplate", "hpa", hpaName)
+		} else {
+			logger.Info("HPA from template already exists", "hpa", hpaName)
+		}
 	}
 
 	// Fetch the referenced HPA
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	hpaName := types.NamespacedName{
-		Name:      smartHPA.Spec.HPAObjectRef.Name,
-		Namespace: smartHPA.Spec.HPAObjectRef.Namespace,
-	}
-	if err := r.Get(ctx, hpaName, hpa); err != nil {
-		// Update status condition to reflect error
-		condition := metav1.Condition{
-			Type:               "Error",
-			Status:             metav1.ConditionTrue,
-			Reason:             "HPANotFound",
-			Message:            "Referenced HPA not found",
-			LastTransitionTime: metav1.Now(),
+	hpaRef := smartHPA.Spec.HPAObjectRef
+	if hpaRef != nil {
+		hpaName := types.NamespacedName{
+			Name:      hpaRef.Name,
+			Namespace: hpaRef.Namespace,
 		}
-		smartHPA.Status.Conditions = []metav1.Condition{condition}
-		if err := r.Status().Update(ctx, smartHPA); err != nil {
-			logger.Error(err, "unable to update SmartHPA status")
+		if err := r.Get(ctx, hpaName, hpa); err != nil {
+			// Update status condition to reflect error
+			condition := metav1.Condition{
+				Type:               "Error",
+				Status:             metav1.ConditionTrue,
+				Reason:             "HPANotFound",
+				Message:            "Referenced HPA not found",
+				LastTransitionTime: metav1.Now(),
+			}
+			smartHPA.Status.Conditions = []metav1.Condition{condition}
+			if err := r.Status().Update(ctx, smartHPA); err != nil {
+				logger.Error(err, "unable to update SmartHPA status")
+			}
+			return ctrl.Result{RequeueAfter: time.Second * 30}, err // Requeue after 30 seconds
 		}
-		return ctrl.Result{}, err
 	}
 
 	// Update status to reflect successful reconciliation
@@ -94,14 +163,15 @@ func (r *SmartHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Context, 
 	smartHPA.Status.Conditions = []metav1.Condition{condition}
 	if err := r.Status().Update(ctx, smartHPA); err != nil {
 		logger.Error(err, "unable to update SmartHPA status")
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: time.Second * 5}, err // Requeue after 5 seconds
 	}
 
 	// Enqueue for scheduling
 	r.queue <- req.NamespacedName
 	klog.Infof("Enqueued SmartHPA %s", req.NamespacedName)
 
-	return ctrl.Result{}, nil
+	// Requeue for periodic reconciliation
+	return ctrl.Result{RequeueAfter: time.Minute * 5}, nil // Requeue every 5 minutes
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -109,5 +179,6 @@ func (r *SmartHorizontalPodAutoscalerReconciler) SetupWithManager(mgr ctrl.Manag
 	r.queue = queue
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&autoscalingv1alpha1.SmartHorizontalPodAutoscaler{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}). // Watch owned HPAs
 		Complete(r)
 }

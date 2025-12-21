@@ -1,0 +1,49 @@
+apiVersion: autoscaling.sarabala.io/v1alpha1
+kind: SmartHorizontalPodAutoscaler
+metadata:
+  name: overlapping-smarthpa
+spec:
+  HPAObjectRef:
+    name: my-app-hpa
+    namespace: default
+  triggers:
+    - name: first-window
+      startTime: "14:05:00"  # 21:05 PM
+      endTime: "22:50:00"    # 21:00 PM
+      timezone: "America/Los_Angeles"
+      priority: 100          # Higher priority
+      interval:
+        recurring: "M,TU,W,TH,F,SUN"   # Monday through Friday
+      startHPAConfig:
+        minReplicas: 5
+        maxReplicas: 10
+    - name: second-window
+      startTime: "14:13:00"  # 2:13 PM (overlaps with first-window by 2 minutes)
+      endTime: "23:25:00"    # 2:25 PM
+      timezone: "America/Los_Angeles"
+      priority: 50           # Lower priority
+      interval:
+        recurring: "M,TU,W,TH,F,SUN"   # Monday through Friday
+      startHPAConfig:
+        minReplicas: 3
+        maxReplicas: 7
+# ---
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# metadata:
+#   name: my-app-hpa
+#   namespace: default
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: my-app
+#   minReplicas: 1
+#   maxReplicas: 5
+#   metrics:
+#     - type: Resource
+#       resource:
+#         name: cpu
+#         target:
+#           type: Utilization
+#           averageUtilization: 75

@@ -1,19 +1,34 @@
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: autoscaling.sarabala.io/v1alpha1
+kind: SmartHorizontalPodAutoscaler
 metadata:
-  name: example-hpa
+  name: example-smarthpa
   namespace: default
 spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: example-deployment
-  minReplicas: 1
-  maxReplicas: 1
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 50
+  HPAObjectRef:
+    name: example-hpa
+    namespace: default
+  triggers:
+  - name: business-hours
+    priority: 100
+    timezone: "America/Los_Angeles"
+    interval:
+      recurring: "M,TU,W,TH,F"
+    startTime: "09:00:00"
+    endTime: "20:00:00"
+    startHPAConfig:
+      minReplicas: 5
+      maxReplicas: 10
+    endHPAConfig:
+      minReplicas: 1
+      maxReplicas: 3
+  - name: weekend-scale-down
+    priority: 50
+    timezone: "America/Los_Angeles"
+    interval:
+      recurring: "SAT,SUN"
+    startHPAConfig:
+      minReplicas: 1
+      maxReplicas: 2
+    endHPAConfig:
+      minReplicas: 1
+      maxReplicas: 2

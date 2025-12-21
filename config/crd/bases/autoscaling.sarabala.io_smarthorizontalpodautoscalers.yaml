@@ -48,9 +48,24 @@ spec:
                   namespace:
                     type: string
                 type: object
+              HPASpecTemplate:
+                properties:
+                  metadata:
+                    type: object
+                  spec:
+                    properties:
+                      desiredReplicas:
+                        format: int32
+                        type: integer
+                      maxReplicas:
+                        format: int32
+                        type: integer
+                      minReplicas:
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
               smartRecommendation:
-                description: HPASpecTemplate *HPASpecTemplate    `json:"HPASpecTemplate,omitempty"
-                  protobuf:"bytes,1,opt,name=HPASpecTemplate"`
                 properties:
                   enabled:
                     type: boolean

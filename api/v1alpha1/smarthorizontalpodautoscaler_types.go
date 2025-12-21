@@ -21,10 +21,22 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
 // WeekdayShort contains short forms of weekdays
 var WeekdayShort = []string{"M", "TU", "W", "TH", "F", "SAT", "SUN"}
+
+// For testing purposes
+var NowFunc = time.Now
+
+func SetNowFunc(f func() time.Time) {
+	NowFunc = f
+}
+
+func ResetNowFunc() {
+	NowFunc = time.Now
+}
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
@@ -54,36 +66,65 @@ type Interval struct {
 }
 
 func (i *Trigger) NeedRecurring() bool {
+	// If no interval is specified, do not recur
+	if i.Interval == nil {
+		klog.Infof("NeedRecurring: No interval specified for trigger %s", i.Name)
+		return false
+	}
+
 	// Load timezone, default to UTC if not specified or invalid
 	loc, err := time.LoadLocation(i.Timezone)
 	if err != nil {
+		klog.Warningf("NeedRecurring: Failed to load timezone %s for trigger %s, using UTC: %v", i.Timezone, i.Name, err)
 		loc = time.UTC
 	}
 
 	// Get current time in the specified timezone
-	now := time.Now().In(loc)
+	now := NowFunc().In(loc)
+
+	// If recurring is specified, check if today matches
 	if i.Interval.Recurring != "" {
 		// Convert current weekday to short form
-		currentDay := WeekdayShort[now.Weekday()]
-		// Check if current day is in the recurring schedule
-		return strings.Contains(i.Interval.Recurring, currentDay)
-	}
-
-	// Parse start and end dates
-	start, err := time.Parse(time.DateOnly, i.Interval.StartDate)
-	if err != nil {
+		currentDay := WeekdayShort[int(now.Weekday())]
+		klog.Infof("NeedRecurring: Checking trigger %s - Current day: %s, Recurring: %s", i.Name, currentDay, i.Interval.Recurring)
+		// Split recurring days and check for exact match
+		days := strings.Split(i.Interval.Recurring, ",")
+		for _, day := range days {
+			trimmedDay := strings.TrimSpace(day)
+			klog.Infof("NeedRecurring: Comparing %s with %s", currentDay, trimmedDay)
+			if trimmedDay == currentDay {
+				klog.Infof("NeedRecurring: Found match for trigger %s", i.Name)
+				return true
+			}
+		}
+		klog.Infof("NeedRecurring: No day match found for trigger %s", i.Name)
 		return false
 	}
-	end, err := time.Parse(time.DateOnly, i.Interval.EndDate)
-	if err != nil {
-		return false
+
+	// If date range is specified, check if we're within range
+	if i.Interval.StartDate != "" && i.Interval.EndDate != "" {
+		// Parse start and end dates
+		start, err := time.Parse(time.DateOnly, i.Interval.StartDate)
+		if err != nil {
+			klog.Errorf("NeedRecurring: Failed to parse start date for trigger %s: %v", i.Name, err)
+			return false
+		}
+		end, err := time.Parse(time.DateOnly, i.Interval.EndDate)
+		if err != nil {
+			klog.Errorf("NeedRecurring: Failed to parse end date for trigger %s: %v", i.Name, err)
+			return false
+		}
+
+		// Convert to the specified timezone
+		start = start.In(loc)
+		end = end.In(loc)
+
+		return now.After(start) && now.Before(end)
 	}
 
-	// Convert to the specified timezone
-	start = start.In(loc)
-	end = end.In(loc)
-
-	return now.After(start) && now.Before(end) && i.Interval.Recurring != ""
+	klog.Infof("NeedRecurring: Neither recurring nor date range specified for trigger %s", i.Name)
+	// If neither recurring nor date range is specified, do not recur
+	return false
 }
 
 type Trigger struct {
@@ -114,7 +155,7 @@ type SmartRecommendation struct {
 
 // SmartHorizontalPodAutoscalerSpec defines the desired state of SmartHorizontalPodAutoscaler
 type SmartHorizontalPodAutoscalerSpec struct {
-	// HPASpecTemplate *HPASpecTemplate    `json:"HPASpecTemplate,omitempty" protobuf:"bytes,1,opt,name=HPASpecTemplate"`
+	HPASpecTemplate     *HPASpecTemplate     `json:"HPASpecTemplate,omitempty" protobuf:"bytes,1,opt,name=HPASpecTemplate"` // If set, a new HPA will be created from this template.
 	SmartRecommendation *SmartRecommendation `json:"smartRecommendation,omitempty" protobuf:"bytes,1,opt,name=smartRecommendation"`
 	HPAObjectRef        *HPAObjectReference  `json:"HPAObjectRef,omitempty" protobuf:"bytes,2,opt,name=HPAObjectRef"`
 	Triggers            Triggers             `json:"triggers,omitempty" protobuf:"bytes,3,opt,name=triggers"`
