@@ -122,8 +122,11 @@ func TestIsWithinTimeWindow(t *testing.T) {
 				StartTime: "09:00:00",
 				EndTime:   "17:00:00",
 				Timezone:  "UTC",
+				Interval: &sarabalaiov1alpha1.Interval{
+					Recurring: "M,TU,W,TH,F",
+				},
 			},
-			currentTime: time.Date(2024, 3, 20, 12, 0, 0, 0, time.UTC),
+			currentTime: time.Date(2024, 3, 20, 12, 0, 0, 0, time.UTC), // Wednesday
 			want:        Within,
 			wantErr:     false,
 		},
@@ -133,8 +136,11 @@ func TestIsWithinTimeWindow(t *testing.T) {
 				StartTime: "09:00:00",
 				EndTime:   "17:00:00",
 				Timezone:  "UTC",
+				Interval: &sarabalaiov1alpha1.Interval{
+					Recurring: "M,TU,W,TH,F",
+				},
 			},
-			currentTime: time.Date(2024, 3, 20, 8, 0, 0, 0, time.UTC),
+			currentTime: time.Date(2024, 3, 20, 8, 0, 0, 0, time.UTC), // Wednesday
 			want:        Before,
 			wantErr:     false,
 		},
@@ -144,8 +150,11 @@ func TestIsWithinTimeWindow(t *testing.T) {
 				StartTime: "09:00:00",
 				EndTime:   "17:00:00",
 				Timezone:  "UTC",
+				Interval: &sarabalaiov1alpha1.Interval{
+					Recurring: "M,TU,W,TH,F",
+				},
 			},
-			currentTime: time.Date(2024, 3, 20, 18, 0, 0, 0, time.UTC),
+			currentTime: time.Date(2024, 3, 20, 18, 0, 0, 0, time.UTC), // Wednesday
 			want:        After,
 			wantErr:     false,
 		},
@@ -1289,8 +1298,18 @@ func TestPriorityTransitions(t *testing.T) {
 	ns := "test-ns"
 	ctx := context.Background()
 	queue := make(chan types.NamespacedName, 10)
-	client := fake.NewClientBuilder().Build()
+	client := fake.NewClientBuilder().WithScheme(setupTestScheme()).Build()
 	scheduler := NewScheduler(client, queue)
+
+	// Set default mock time before any processing happens
+	// This prevents the scheduler from using real time during initialization
+	defaultTime := time.Date(2024, 3, 20, 7, 0, 0, 0, time.UTC)
+	sarabalaiov1alpha1.NowFunc = func() time.Time {
+		return defaultTime
+	}
+	t.Cleanup(func() {
+		sarabalaiov1alpha1.ResetNowFunc()
+	})
 
 	// Create test HPA
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
@@ -1405,20 +1424,24 @@ func TestPriorityTransitions(t *testing.T) {
 	for _, tt := range transitions {
 		t.Run(tt.description, func(t *testing.T) {
 			// Set the mock time before sending the item to the queue
-			originalNowFunc := sarabalaiov1alpha1.NowFunc
 			sarabalaiov1alpha1.NowFunc = func() time.Time {
 				return tt.time
 			}
-			defer func() { sarabalaiov1alpha1.NowFunc = originalNowFunc }()
 
-			// Send item to queue
-			queue <- types.NamespacedName{
+			// Clear the scheduler context to force reinitialization
+			smartHPAKey := types.NamespacedName{
 				Name:      smartHPA.Name,
 				Namespace: smartHPA.Namespace,
 			}
+			scheduler.mutex.Lock()
+			delete(scheduler.contexts, smartHPAKey)
+			scheduler.mutex.Unlock()
+
+			// Send item to queue
+			queue <- smartHPAKey
 
 			// Wait for processing
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 
 			// Get the updated HPA
 			updatedHPA := &autoscalingv2.HorizontalPodAutoscaler{}

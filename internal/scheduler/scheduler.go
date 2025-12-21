@@ -195,8 +195,8 @@ func (s *Scheduler) Stop() {
 	s.contexts = make(map[types.NamespacedName]*SmartHPAContext)
 }
 
-// For testing purposes
-var nowFunc = sarabalaiov1alpha1.NowFunc
+// For testing purposes - use a function that calls NowFunc() so it picks up test mocks
+var nowFunc = func() time.Time { return sarabalaiov1alpha1.NowFunc() }
 
 func (ts *TriggerSchedule) parseTimeString(timeStr string) (time.Time, error) {
 	// Handle empty string
