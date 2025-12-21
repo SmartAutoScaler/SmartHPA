@@ -86,7 +86,7 @@ jobs:
         label: coverage
         message: ${{ steps.coverage.outputs.coverage }}%
         color: ${{ steps.coverage.outputs.color }}
-    
+
     - name: Coverage Badge Info
       if: github.ref == 'refs/heads/main'
       run: |
@@ -110,8 +110,9 @@ jobs:
     #   run: make test-e2e
 
     - name: Upload coverage
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v5
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         file: ./cover.out
         flags: unittests
         name: codecov-umbrella
