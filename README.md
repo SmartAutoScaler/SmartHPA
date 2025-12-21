@@ -1,6 +1,8 @@
 # SmartHPA (Smart Horizontal Pod Autoscaler)
 
 [![Build and Test](https://github.com/sarabala1979/SmartHPA/actions/workflows/build-test.yaml/badge.svg)](https://github.com/sarabala1979/SmartHPA/actions/workflows/build-test.yaml)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/sarabala1979/GIST_ID/raw/smarthpa-coverage.json)](https://github.com/sarabala1979/SmartHPA/actions/workflows/build-test.yaml)
+[![codecov](https://codecov.io/gh/sarabala1979/SmartHPA/branch/main/graph/badge.svg)](https://codecov.io/gh/sarabala1979/SmartHPA)
 
 SmartHPA is a Kubernetes controller that extends the standard HPA (Horizontal Pod Autoscaler) functionality by adding time-based scaling capabilities. It allows you to define different scaling configurations for different time windows, making it perfect for workloads with predictable traffic patterns. In production systems, SmartHPA will automatically balance your HPA—fully done for you (DFY)—requiring no manual intervention. By intelligently managing your pod scaling, SmartHPA typically reduces resource costs by approximately 30% compared to standard HPA implementations.
 

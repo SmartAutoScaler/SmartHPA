@@ -114,6 +114,26 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+.PHONY: coverage
+coverage: test ## Run tests and display coverage report.
+	@echo "📊 Coverage Report:"
+	@echo "===================="
+	@go tool cover -func=cover.out | grep -v "total:" | tail -20
+	@echo "===================="
+	@echo "Total Coverage:"
+	@go tool cover -func=cover.out | grep total
+	@echo ""
+	@echo "🌐 Generating HTML report..."
+	@go tool cover -html=cover.out -o cover.html
+	@echo "✅ Open cover.html in your browser for detailed analysis"
+
+.PHONY: coverage-html
+coverage-html: coverage ## Run tests and open HTML coverage report.
+	@echo "🌐 Opening coverage report in browser..."
+	@command -v open >/dev/null 2>&1 && open cover.html || \
+	 command -v xdg-open >/dev/null 2>&1 && xdg-open cover.html || \
+	 echo "❌ Could not open browser. Please open cover.html manually."
+
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
 test-e2e:
