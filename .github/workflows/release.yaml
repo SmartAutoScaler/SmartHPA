@@ -71,19 +71,43 @@ jobs:
         build-args: |
           BUILDPLATFORM=linux/amd64
 
-    - name: Update install.yaml with release image
+    - name: Generate install.yaml with release image
+      id: install
       run: |
         VERSION=${GITHUB_REF#refs/tags/}
-        INSTALL_FILE="config/manifests/install.yaml"
-        if [ ! -f "$INSTALL_FILE" ]; then
-          echo "Error: $INSTALL_FILE not found"
-          ls -la config/manifests/
-          exit 1
+        RELEASE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+        
+        # Update the manager image in kustomization
+        cd config/manager
+        kustomize edit set image controller=${RELEASE_IMAGE}
+        cd ../..
+        
+        # Build complete install.yaml using kustomize
+        kustomize build config/default > install.yaml
+        
+        # Verify the image was updated
+        if grep -q "${RELEASE_IMAGE}" install.yaml; then
+          echo "✅ install.yaml updated with image: ${RELEASE_IMAGE}"
+        else
+          echo "⚠️ Image not found in install.yaml, updating manually..."
+          sed -i "s|image:.*controller.*|image: ${RELEASE_IMAGE}|g" install.yaml
         fi
-        # Update the image tag to the release version
-        sed -i "s|image: sarabala.io/smarthpa:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}|g" "$INSTALL_FILE"
-        echo "Updated install.yaml with image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-        cat "$INSTALL_FILE"
+        
+        echo "Generated install.yaml:"
+        head -100 install.yaml
+        echo "..."
+        echo "Total lines: $(wc -l < install.yaml)"
+        
+        # Output for next steps
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "image=${RELEASE_IMAGE}" >> $GITHUB_OUTPUT
+
+    - name: Upload install.yaml as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: install-yaml
+        path: install.yaml
+        retention-days: 90
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -92,17 +116,107 @@ jobs:
         body: |
           ## SmartHPA ${{ github.ref_name }}
           
-          ### Installation
+          Smart Horizontal Pod Autoscaler for Kubernetes - Schedule-based HPA configuration management.
+          
+          ---
+          
+          ### 📋 Prerequisites
+          
+          - Kubernetes cluster v1.26+
+          - kubectl configured to access your cluster
+          - HPA already configured for your deployments
+          
+          ---
+          
+          ### 🚀 Installation
+          
           ```bash
           kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
           ```
           
-          ### Docker Image
+          ---
+          
+          ### ✅ Verify Installation
+          
           ```bash
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          # Check controller is running
+          kubectl get pods -n smarthpa-system
+          
+          # Check CRD is installed
+          kubectl get crd smarthorizontalpodautoscalers.autoscaling.sarabala.io
+          
+          # View controller logs
+          kubectl logs -n smarthpa-system -l control-plane=controller-manager -f
           ```
+          
+          ---
+          
+          ### 📝 Usage Example
+          
+          Create a SmartHPA resource to manage your HPA based on schedules:
+          
+          ```yaml
+          apiVersion: autoscaling.sarabala.io/v1alpha1
+          kind: SmartHorizontalPodAutoscaler
+          metadata:
+            name: my-app-smart-hpa
+            namespace: default
+          spec:
+            hpaRef:
+              name: my-app-hpa
+            defaultConfig:
+              minReplicas: 2
+              maxReplicas: 10
+            triggers:
+              - name: business-hours
+                schedule:
+                  startTime: "09:00"
+                  endTime: "18:00"
+                  days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+                  timezone: "America/New_York"
+                config:
+                  minReplicas: 5
+                  maxReplicas: 20
+          ```
+          
+          ```bash
+          kubectl apply -f my-smart-hpa.yaml
+          ```
+          
+          ---
+          
+          ### 🗑️ Uninstall
+          
+          ```bash
+          kubectl delete -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
+          ```
+          
+          ---
+          
+          ### 📦 What's Included
+          
+          | Component | Description |
+          |-----------|-------------|
+          | CRD | SmartHorizontalPodAutoscaler custom resource definition |
+          | Controller | Manages HPA configurations based on schedules |
+          | RBAC | ClusterRole, ClusterRoleBinding, ServiceAccount |
+          | Namespace | `smarthpa-system` for controller deployment |
+          
+          ---
+          
+          ### 🐳 Docker Image
+          
+          ```bash
+          docker pull ${{ steps.install.outputs.image }}
+          ```
+          
+          ---
+          
+          ### 📚 Documentation
+          
+          For more information, visit the [SmartHPA Repository](https://github.com/${{ github.repository }}).
         files: |
-          config/manifests/install.yaml
+          install.yaml
         draft: false
         prerelease: false
       env:
