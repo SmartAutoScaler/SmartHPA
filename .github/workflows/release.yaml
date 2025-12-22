@@ -74,13 +74,16 @@ jobs:
     - name: Update install.yaml with release image
       run: |
         VERSION=${GITHUB_REF#refs/tags/}
-        if [ ! -f install.yaml ]; then
-          echo "Error: install.yaml not found"
-          ls -la
+        INSTALL_FILE="config/manifests/install.yaml"
+        if [ ! -f "$INSTALL_FILE" ]; then
+          echo "Error: $INSTALL_FILE not found"
+          ls -la config/manifests/
           exit 1
         fi
-        sed -i "s|image: sarabala.io/smarthpa:v0.0.1|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}|g" install.yaml
-        cat install.yaml
+        # Update the image tag to the release version
+        sed -i "s|image: sarabala.io/smarthpa:.*|image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}|g" "$INSTALL_FILE"
+        echo "Updated install.yaml with image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+        cat "$INSTALL_FILE"
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1
@@ -93,8 +96,13 @@ jobs:
           ```bash
           kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
           ```
+          
+          ### Docker Image
+          ```bash
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          ```
         files: |
-          install.yaml
+          config/manifests/install.yaml
         draft: false
         prerelease: false
       env:
