@@ -156,8 +156,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "SmartHorizontalPodAutoscaler")
 		os.Exit(1)
 	}
-	scheduler := scheduler.NewScheduler(mgr.GetClient(), queue)
-	go scheduler.Start()
+
+	// Create and register scheduler with manager for proper lifecycle management
+	hpaScheduler := scheduler.NewScheduler(mgr.GetClient(), queue)
+	if err := mgr.Add(hpaScheduler); err != nil {
+		setupLog.Error(err, "unable to add scheduler to manager")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

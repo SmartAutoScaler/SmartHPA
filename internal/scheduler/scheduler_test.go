@@ -344,7 +344,6 @@ func TestSchedule_WithRecurring(t *testing.T) {
 
 			// Create SmartHPAContext
 			sc := &SmartHPAContext{
-				client:    client,
 				schedules: make(map[string]*TriggerSchedule),
 				cron:      cron.New(),
 			}
@@ -649,7 +648,6 @@ func TestSmartHPAContextExecute(t *testing.T) {
 
 	ctx := context.Background()
 	sc := &SmartHPAContext{
-		client:    k8sClient,
 		schedules: make(map[string]*TriggerSchedule),
 		cron:      cron.New(),
 	}
@@ -868,8 +866,12 @@ func TestSchedulerStart(t *testing.T) {
 	queue := make(chan types.NamespacedName, 1)
 	scheduler := NewScheduler(k8sClient, queue)
 
-	// Start scheduler
-	scheduler.Start()
+	// Start scheduler with cancellable context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = scheduler.Start(ctx)
+	}()
 
 	// Send item to queue
 	queue <- types.NamespacedName{
@@ -890,7 +892,8 @@ func TestSchedulerStart(t *testing.T) {
 	assert.NotEmpty(t, smartHPAContext.GetSchedules())
 
 	// Stop the scheduler to clean up resources
-	scheduler.Stop()
+	cancel()
+	time.Sleep(100 * time.Millisecond) // Give time for graceful shutdown
 }
 
 func TestApplyNextHighestPriorityConfig(t *testing.T) {
@@ -921,7 +924,6 @@ func TestApplyNextHighestPriorityConfig(t *testing.T) {
 	// Create test context with multiple triggers
 	c := cron.New()
 	sc := &SmartHPAContext{
-		client:    k8sClient,
 		schedules: make(map[string]*TriggerSchedule),
 		cron:      c,
 	}

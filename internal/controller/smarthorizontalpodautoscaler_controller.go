@@ -24,12 +24,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	autoscalingv1alpha1 "github.com/sarabala1979/SmartHPA/api/v1alpha1"
+)
+
+const (
+	// requeueIntervalShort is the interval for quick retries on transient errors.
+	requeueIntervalShort = 5 * time.Second
+	// requeueIntervalMedium is the interval for retries on recoverable errors.
+	requeueIntervalMedium = 30 * time.Second
+	// requeueIntervalLong is the interval for periodic reconciliation.
+	requeueIntervalLong = 5 * time.Minute
 )
 
 // SmartHorizontalPodAutoscalerReconciler reconciles a SmartHorizontalPodAutoscaler object
@@ -44,12 +52,8 @@ type SmartHorizontalPodAutoscalerReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling.sarabala.io,resources=smarthorizontalpodautoscalers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the SmartHorizontalPodAutoscaler object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
+// Reconcile moves the current state of the cluster closer to the desired state
+// by managing HPA configurations based on SmartHorizontalPodAutoscaler specs.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
@@ -59,15 +63,15 @@ func (r *SmartHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Context, 
 	// Fetch the SmartHorizontalPodAutoscaler instance
 	smartHPA := &autoscalingv1alpha1.SmartHorizontalPodAutoscaler{}
 	if err := r.Get(ctx, req.NamespacedName, smartHPA); err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			// Resource was deleted, log it and return without error
-			logger.Info("SmartHorizontalPodAutoscaler was deleted, cleaning up",
-				"name", req.Name,
-				"namespace", req.Namespace)
-			return ctrl.Result{}, nil
+		if client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "unable to fetch SmartHorizontalPodAutoscaler")
+			return ctrl.Result{RequeueAfter: requeueIntervalMedium}, err
 		}
-		logger.Error(err, "unable to fetch SmartHorizontalPodAutoscaler")
-		return ctrl.Result{RequeueAfter: time.Second * 30}, client.IgnoreNotFound(err)
+		// Resource was deleted, log it and return without error
+		logger.Info("SmartHorizontalPodAutoscaler was deleted, cleaning up",
+			"name", req.Name,
+			"namespace", req.Namespace)
+		return ctrl.Result{}, nil
 	}
 
 	// Check if the resource is being deleted
@@ -127,51 +131,73 @@ func (r *SmartHorizontalPodAutoscalerReconciler) Reconcile(ctx context.Context, 
 		}
 	}
 
-	// Fetch the referenced HPA
-	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	hpaRef := smartHPA.Spec.HPAObjectRef
-	if hpaRef != nil {
-		hpaName := types.NamespacedName{
-			Name:      hpaRef.Name,
-			Namespace: hpaRef.Namespace,
-		}
-		if err := r.Get(ctx, hpaName, hpa); err != nil {
-			// Update status condition to reflect error
-			condition := metav1.Condition{
-				Type:               "Error",
-				Status:             metav1.ConditionTrue,
-				Reason:             "HPANotFound",
-				Message:            "Referenced HPA not found",
-				LastTransitionTime: metav1.Now(),
-			}
-			smartHPA.Status.Conditions = []metav1.Condition{condition}
-			if err := r.Status().Update(ctx, smartHPA); err != nil {
-				logger.Error(err, "unable to update SmartHPA status")
-			}
-			return ctrl.Result{RequeueAfter: time.Second * 30}, err // Requeue after 30 seconds
-		}
+	// Validate and fetch the referenced HPA
+	if err := r.validateHPAReference(ctx, smartHPA); err != nil {
+		logger.Error(err, "HPA reference validation failed")
+		return ctrl.Result{RequeueAfter: requeueIntervalMedium}, err
 	}
 
 	// Update status to reflect successful reconciliation
-	condition := metav1.Condition{
+	if err := r.updateStatus(ctx, smartHPA, metav1.Condition{
 		Type:               "Ready",
 		Status:             metav1.ConditionTrue,
 		Reason:             "Reconciled",
 		Message:            "SmartHPA reconciled successfully",
 		LastTransitionTime: metav1.Now(),
-	}
-	smartHPA.Status.Conditions = []metav1.Condition{condition}
-	if err := r.Status().Update(ctx, smartHPA); err != nil {
+	}); err != nil {
 		logger.Error(err, "unable to update SmartHPA status")
-		return ctrl.Result{RequeueAfter: time.Second * 5}, err // Requeue after 5 seconds
+		return ctrl.Result{RequeueAfter: requeueIntervalShort}, err
 	}
 
 	// Enqueue for scheduling
 	r.queue <- req.NamespacedName
-	klog.Infof("Enqueued SmartHPA %s", req.NamespacedName)
+	logger.V(1).Info("enqueued SmartHPA for scheduling", "namespacedName", req.NamespacedName)
 
 	// Requeue for periodic reconciliation
-	return ctrl.Result{RequeueAfter: time.Minute * 5}, nil // Requeue every 5 minutes
+	return ctrl.Result{RequeueAfter: requeueIntervalLong}, nil
+}
+
+// validateHPAReference validates that the referenced HPA exists and updates status on error.
+func (r *SmartHorizontalPodAutoscalerReconciler) validateHPAReference(ctx context.Context, smartHPA *autoscalingv1alpha1.SmartHorizontalPodAutoscaler) error {
+	hpaRef := smartHPA.Spec.HPAObjectRef
+	if hpaRef == nil {
+		return nil // No reference to validate
+	}
+
+	if hpaRef.Name == "" {
+		return nil // Empty name, skip validation
+	}
+
+	namespace := hpaRef.Namespace
+	if namespace == "" {
+		namespace = smartHPA.Namespace
+	}
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+	hpaKey := types.NamespacedName{
+		Name:      hpaRef.Name,
+		Namespace: namespace,
+	}
+
+	if err := r.Get(ctx, hpaKey, hpa); err != nil {
+		// Update status condition to reflect error
+		_ = r.updateStatus(ctx, smartHPA, metav1.Condition{
+			Type:               "Error",
+			Status:             metav1.ConditionTrue,
+			Reason:             "HPANotFound",
+			Message:            "Referenced HPA not found: " + hpaRef.Name,
+			LastTransitionTime: metav1.Now(),
+		})
+		return err
+	}
+
+	return nil
+}
+
+// updateStatus updates the SmartHPA status with the given condition.
+func (r *SmartHorizontalPodAutoscalerReconciler) updateStatus(ctx context.Context, smartHPA *autoscalingv1alpha1.SmartHorizontalPodAutoscaler, condition metav1.Condition) error {
+	smartHPA.Status.Conditions = []metav1.Condition{condition}
+	return r.Status().Update(ctx, smartHPA)
 }
 
 // SetupWithManager sets up the controller with the Manager.

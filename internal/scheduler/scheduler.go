@@ -9,18 +9,28 @@ import (
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/robfig/cron/v3"
-	sarabalaiov1alpha1 "github.com/sarabala1979/SmartHPA/api/v1alpha1"
+	autoscalingv1alpha1 "github.com/sarabala1979/SmartHPA/api/v1alpha1"
 )
 
-// TriggerSchedule represents a scheduled trigger with its HPA configuration
+// Package-level logger for scheduler operations.
+var log = ctrl.Log.WithName("scheduler")
+
+const (
+	// defaultWorkerCount is the number of concurrent workers processing items.
+	defaultWorkerCount = 10
+	// stopGracePeriod is the time to wait for goroutines during shutdown.
+	stopGracePeriod = 50 * time.Millisecond
+)
+
+// TriggerSchedule represents a scheduled trigger with its HPA configuration.
 type TriggerSchedule struct {
 	client            client.Client
 	HPANamespacedName types.NamespacedName
-	Trigger           *sarabalaiov1alpha1.Trigger
+	Trigger           *autoscalingv1alpha1.Trigger
 	cron              *cron.Cron
 	context           *SmartHPAContext // Reference to parent context for priority handling
 	mutex             sync.RWMutex     // Protects cron and trigger
@@ -36,8 +46,8 @@ const (
 	After
 )
 
+// SmartHPAContext holds the schedules for a single SmartHPA resource.
 type SmartHPAContext struct {
-	client    client.Client
 	schedules map[string]*TriggerSchedule
 	cron      *cron.Cron
 	mutex     sync.RWMutex // Protects schedules map
@@ -62,10 +72,10 @@ func NewScheduler(client client.Client, queue chan types.NamespacedName) *Schedu
 	}
 }
 
+// ProcessItem processes SmartHPA items from the queue and sets up their schedules.
 func (s *Scheduler) ProcessItem(ctx context.Context) {
-	defer func() {
-		klog.Info("ProcessItem goroutine exiting")
-	}()
+	logger := log.WithName("worker")
+	defer logger.V(1).Info("worker goroutine exiting")
 
 	for {
 		select {
@@ -74,61 +84,97 @@ func (s *Scheduler) ProcessItem(ctx context.Context) {
 		case <-s.done:
 			return
 		case item := <-s.queue:
-			klog.Infof("Processing SmartHPA %s", item)
-			var obj sarabalaiov1alpha1.SmartHorizontalPodAutoscaler
-			err := s.client.Get(ctx, item, &obj)
-			if err != nil {
-				klog.Errorf("Error getting SmartHPA %s: %v", item, err)
-				continue
-			}
-			s.mutex.RLock()
-			hpaContext := s.contexts[item]
-			s.mutex.RUnlock()
-			if hpaContext == nil {
-				hpaContext = &SmartHPAContext{
-					schedules: make(map[string]*TriggerSchedule),
-					cron:      cron.New(),
-					mutex:     sync.RWMutex{},
-				}
-				// Initialize schedules with mutexes
-				for _, trigger := range obj.Spec.Triggers {
-					// Load timezone
-					loc, err := time.LoadLocation(trigger.Timezone)
-					if err != nil {
-						klog.Errorf("invalid timezone %s: %v", trigger.Timezone, err)
-						loc = time.UTC
-					}
-					hpaContext.mutex.Lock()
-					schedule := &TriggerSchedule{
-						client:  s.client,
-						Trigger: &trigger,
-						//create cron with timezone
-						cron:  cron.New(cron.WithLocation(loc)),
-						mutex: sync.RWMutex{},
-						HPANamespacedName: types.NamespacedName{
-							Namespace: obj.Spec.HPAObjectRef.Namespace,
-							Name:      obj.Spec.HPAObjectRef.Name,
-						},
-						context: hpaContext,
-					}
-					hpaContext.schedules[trigger.Name] = schedule
-					hpaContext.mutex.Unlock()
-				}
-				s.mutex.Lock()
-				s.contexts[item] = hpaContext
-				s.mutex.Unlock()
-			}
-			hpaContext.cron.Start()
-			go hpaContext.execute(ctx)
+			s.processSmartHPA(ctx, item)
 		}
 	}
 }
 
-// Start starts the scheduler
-func (s *Scheduler) Start() {
-	for i := 0; i < 10; i++ {
-		go s.ProcessItem(context.Background())
+// processSmartHPA handles a single SmartHPA item from the queue.
+func (s *Scheduler) processSmartHPA(ctx context.Context, item types.NamespacedName) {
+	logger := log.WithValues("smartHPA", item)
+	logger.V(1).Info("processing SmartHPA")
+
+	var obj autoscalingv1alpha1.SmartHorizontalPodAutoscaler
+	if err := s.client.Get(ctx, item, &obj); err != nil {
+		logger.Error(err, "failed to get SmartHPA")
+		return
 	}
+
+	// Check if HPAObjectRef is valid
+	if obj.Spec.HPAObjectRef == nil {
+		logger.V(1).Info("no HPAObjectRef specified, skipping scheduling")
+		return
+	}
+
+	s.mutex.RLock()
+	hpaContext := s.contexts[item]
+	s.mutex.RUnlock()
+
+	if hpaContext == nil {
+		hpaContext = s.initializeContext(ctx, &obj)
+		s.mutex.Lock()
+		s.contexts[item] = hpaContext
+		s.mutex.Unlock()
+	}
+
+	hpaContext.cron.Start()
+	go hpaContext.execute(ctx)
+}
+
+// initializeContext creates a new SmartHPAContext with schedules for all triggers.
+func (s *Scheduler) initializeContext(ctx context.Context, obj *autoscalingv1alpha1.SmartHorizontalPodAutoscaler) *SmartHPAContext {
+	hpaContext := &SmartHPAContext{
+		schedules: make(map[string]*TriggerSchedule),
+		cron:      cron.New(),
+	}
+
+	for i := range obj.Spec.Triggers {
+		trigger := &obj.Spec.Triggers[i]
+		loc := loadTimezone(trigger.Timezone)
+
+		schedule := &TriggerSchedule{
+			client:  s.client,
+			Trigger: trigger,
+			cron:    cron.New(cron.WithLocation(loc)),
+			HPANamespacedName: types.NamespacedName{
+				Namespace: obj.Spec.HPAObjectRef.Namespace,
+				Name:      obj.Spec.HPAObjectRef.Name,
+			},
+			context: hpaContext,
+		}
+
+		hpaContext.mutex.Lock()
+		hpaContext.schedules[trigger.Name] = schedule
+		hpaContext.mutex.Unlock()
+	}
+
+	return hpaContext
+}
+
+// loadTimezone loads a timezone location, falling back to UTC on error.
+func loadTimezone(timezone string) *time.Location {
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		log.V(1).Info("invalid timezone, using UTC", "timezone", timezone, "error", err)
+		return time.UTC
+	}
+	return loc
+}
+
+// Start implements manager.Runnable interface for lifecycle management.
+// It starts the scheduler workers and blocks until the context is cancelled.
+func (s *Scheduler) Start(ctx context.Context) error {
+	log.Info("starting scheduler", "workers", defaultWorkerCount)
+
+	for i := 0; i < defaultWorkerCount; i++ {
+		go s.ProcessItem(ctx)
+	}
+
+	// Block until context is cancelled
+	<-ctx.Done()
+	log.Info("scheduler context cancelled, initiating shutdown")
+	s.Stop()
+	return nil
 }
 
 // Stop stops the scheduler and cleans up resources
@@ -152,69 +198,79 @@ func (c *SmartHPAContext) GetSchedules() map[string]*TriggerSchedule {
 	return schedulesCopy
 }
 
+// Stop gracefully stops the scheduler and cleans up all resources.
 func (s *Scheduler) Stop() {
-	// Signal all goroutines to stop
-	close(s.done)
+	log.Info("stopping scheduler")
 
-	// Wait a bit for goroutines to finish
-	time.Sleep(50 * time.Millisecond)
+	// Signal all goroutines to stop (safe to call multiple times via select)
+	select {
+	case <-s.done:
+		// Already closed
+	default:
+		close(s.done)
+	}
+
+	// Wait for goroutines to finish
+	time.Sleep(stopGracePeriod)
 
 	// Stop all cron jobs and clean up contexts
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// Copy contexts to avoid holding lock during cron operations
-	contextsToStop := make([]*SmartHPAContext, 0, len(s.contexts))
-	for _, ctx := range s.contexts {
-		contextsToStop = append(contextsToStop, ctx)
-	}
-
-	// Stop all cron jobs
-	for _, ctx := range contextsToStop {
-		if ctx.cron != nil {
-			ctx.cron.Stop()
-		}
-		// Stop all trigger schedules
-		ctx.mutex.RLock()
-		schedules := make([]*TriggerSchedule, 0, len(ctx.schedules))
-		for _, schedule := range ctx.schedules {
-			schedules = append(schedules, schedule)
-		}
-		ctx.mutex.RUnlock()
-
-		for _, schedule := range schedules {
-			schedule.mutex.Lock()
-			if schedule.cron != nil {
-				schedule.cron.Stop()
-			}
-			schedule.mutex.Unlock()
-		}
+	for _, hpaCtx := range s.contexts {
+		hpaCtx.stop()
 	}
 
 	// Clear the contexts map
 	s.contexts = make(map[types.NamespacedName]*SmartHPAContext)
+	log.Info("scheduler stopped")
+}
+
+// stop stops all cron jobs in the context.
+func (c *SmartHPAContext) stop() {
+	if c.cron != nil {
+		c.cron.Stop()
+	}
+
+	c.mutex.RLock()
+	schedules := make([]*TriggerSchedule, 0, len(c.schedules))
+	for _, schedule := range c.schedules {
+		schedules = append(schedules, schedule)
+	}
+	c.mutex.RUnlock()
+
+	for _, schedule := range schedules {
+		schedule.mutex.Lock()
+		if schedule.cron != nil {
+			schedule.cron.Stop()
+		}
+		schedule.mutex.Unlock()
+	}
 }
 
 // For testing purposes - use a function that calls NowFunc() so it picks up test mocks
-var nowFunc = func() time.Time { return sarabalaiov1alpha1.NowFunc() }
+var nowFunc = func() time.Time { return autoscalingv1alpha1.NowFunc() }
 
+// getPriority returns the priority value from a trigger, defaulting to 0 if nil.
+func getPriority(trigger *autoscalingv1alpha1.Trigger) int {
+	if trigger == nil || trigger.Priority == nil {
+		return 0
+	}
+	return *trigger.Priority
+}
+
+// parseTimeString parses a time string in "15:04:05" format and returns a time.Time for today.
 func (ts *TriggerSchedule) parseTimeString(timeStr string) (time.Time, error) {
-	// Handle empty string
 	if timeStr == "" {
 		return time.Time{}, fmt.Errorf("empty time string")
 	}
 
-	// Load timezone
-	loc, err := time.LoadLocation(ts.Trigger.Timezone)
-	if err != nil {
-		klog.Warningf("Failed to load timezone %s, using UTC: %v", ts.Trigger.Timezone, err)
-		loc = time.UTC
-	}
+	loc := loadTimezone(ts.Trigger.Timezone)
 
 	// Parse the time string in format "15:04:05" (hour:minute:second)
 	t, err := time.Parse("15:04:05", timeStr)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid time format: %v", err)
+		return time.Time{}, fmt.Errorf("invalid time format: %w", err)
 	}
 
 	// Use the current date from nowFunc() with the parsed time in the correct timezone
@@ -232,256 +288,295 @@ func (ts *TriggerSchedule) GetCronTab(timeStr string) (string, error) {
 	return fmt.Sprintf("%d %d * * *", t.Minute(), t.Hour()), nil
 }
 
+// isWithinTimeWindow checks if the given time falls within the trigger's time window.
 func (ts *TriggerSchedule) isWithinTimeWindow(now time.Time) (TimeWindowState, error) {
-	// Parse start and end times
 	startTime, err := ts.parseTimeString(ts.Trigger.StartTime)
 	if err != nil {
-		return Unknown, fmt.Errorf("failed to parse start time: %v", err)
+		return Unknown, fmt.Errorf("failed to parse start time: %w", err)
 	}
 
 	endTime, err := ts.parseTimeString(ts.Trigger.EndTime)
 	if err != nil {
-		return Unknown, fmt.Errorf("failed to parse end time: %v", err)
+		return Unknown, fmt.Errorf("failed to parse end time: %w", err)
 	}
 
-	// Load timezone, default to UTC if not specified or invalid
-	loc, err := time.LoadLocation(ts.Trigger.Timezone)
-	if err != nil {
-		klog.Warningf("Failed to load timezone %s for trigger %s, using UTC: %v", ts.Trigger.Timezone, ts.Trigger.Name, err)
-		loc = time.UTC
-	}
-
-	// Get current time in the specified timezone
+	loc := loadTimezone(ts.Trigger.Timezone)
 	currentTime := now.In(loc)
 
-	// Extract hours and minutes for comparison
-	currentHour := currentTime.Hour()
-	currentMinute := currentTime.Minute()
-	startHour := startTime.Hour()
-	startMinute := startTime.Minute()
-	endHour := endTime.Hour()
-	endMinute := endTime.Minute()
+	// Convert to minutes since midnight for comparison
+	current := toMinutesSinceMidnight(currentTime)
+	start := toMinutesSinceMidnight(startTime)
+	end := toMinutesSinceMidnight(endTime)
 
-	klog.Infof("Time comparison for trigger %s:\n  Current: %02d:%02d\n  Start: %02d:%02d\n  End: %02d:%02d",
-		ts.Trigger.Name, currentHour, currentMinute, startHour, startMinute, endHour, endMinute)
+	logger := log.WithValues("trigger", ts.Trigger.Name)
+	logger.V(2).Info("time window check",
+		"current", formatTime(currentTime),
+		"start", formatTime(startTime),
+		"end", formatTime(endTime))
 
-	// Check if current time is within the time window
-	if ts.Trigger.NeedRecurring() {
-		// Convert times to minutes since midnight for easier comparison
-		current := currentHour*60 + currentMinute
-		start := startHour*60 + startMinute
-		end := endHour*60 + endMinute
-
-		if start <= end {
-			// Normal time window (e.g., 09:00-17:00)
-			if current >= start && current < end {
-				return Within, nil
-			}
-		} else {
-			// Overnight time window (e.g., 22:00-06:00)
-			if current >= start || current < end {
-				return Within, nil
-			}
-		}
-
-		if current >= end {
-			return After, nil
-		}
-		return Before, nil
+	if !ts.Trigger.NeedRecurring() {
+		return Unknown, nil
 	}
 
-	return Unknown, nil
-}
-
-func (ts *TriggerSchedule) applyConfigBasedOnPriority() {
-	if ts.Trigger.Priority != nil {
-		klog.Infof("Applying config for trigger %s with priority %d", ts.Trigger.Name, *ts.Trigger.Priority)
-		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
-			klog.Errorf("Failed to apply config for trigger %s: %v", ts.Trigger.Name, err)
-		}
-	} else {
-		klog.Infof("No priority specified for trigger %s, applying default config", ts.Trigger.Name)
-		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
-			klog.Errorf("Failed to apply default config for trigger %s: %v", ts.Trigger.Name, err)
-		}
+	// Check if within time window
+	if isTimeWithinWindow(current, start, end) {
+		return Within, nil
 	}
+
+	if current >= end {
+		return After, nil
+	}
+	return Before, nil
 }
 
+// toMinutesSinceMidnight converts a time to minutes since midnight.
+func toMinutesSinceMidnight(t time.Time) int {
+	return t.Hour()*60 + t.Minute()
+}
+
+// formatTime formats a time for logging.
+func formatTime(t time.Time) string {
+	return fmt.Sprintf("%02d:%02d", t.Hour(), t.Minute())
+}
+
+// isTimeWithinWindow checks if current time is within the start-end window.
+func isTimeWithinWindow(current, start, end int) bool {
+	if start <= end {
+		// Normal time window (e.g., 09:00-17:00)
+		return current >= start && current < end
+	}
+	// Overnight time window (e.g., 22:00-06:00)
+	return current >= start || current < end
+}
+
+// Schedule sets up cron jobs for the trigger's start and end times.
 func (ts *TriggerSchedule) Schedule() {
 	ts.mutex.Lock()
 	defer ts.mutex.Unlock()
-	klog.Infof("Scheduling trigger %s", ts.Trigger.Name)
-	klog.Infof("Trigger %s start time: %s", ts.Trigger.Name, ts.Trigger.StartTime)
-	klog.Infof("Trigger %s end time: %s", ts.Trigger.Name, ts.Trigger.EndTime)
+
+	logger := log.WithValues("trigger", ts.Trigger.Name)
+	logger.V(1).Info("scheduling trigger",
+		"startTime", ts.Trigger.StartTime,
+		"endTime", ts.Trigger.EndTime)
 
 	// Check if current time is within the time window
 	state, err := ts.isWithinTimeWindow(nowFunc())
 	if err != nil {
-		klog.Errorf("Failed to check time window for trigger %s: %v", ts.Trigger.Name, err)
+		logger.Error(err, "failed to check time window")
 		return
 	}
 
 	// Apply initial configuration based on current time and priority
-	if state == Within {
-		// Check if there's a higher priority schedule active
-		higherPriorityActive := false
-		thisPriority := 0
-		if ts.Trigger.Priority != nil {
-			thisPriority = *ts.Trigger.Priority
+	ts.applyInitialConfig(state)
+
+	// Schedule start and end times
+	if err := ts.scheduleCronJobs(logger); err != nil {
+		logger.Error(err, "failed to schedule cron jobs")
+		return
+	}
+
+	ts.cron.Start()
+}
+
+// applyInitialConfig applies the initial HPA configuration based on the current time window state.
+func (ts *TriggerSchedule) applyInitialConfig(state TimeWindowState) {
+	logger := log.WithValues("trigger", ts.Trigger.Name)
+
+	switch state {
+	case Within:
+		if ts.hasHigherPriorityActive() {
+			logger.V(1).Info("higher priority schedule active, skipping config application")
+			return
 		}
-
-		// Get all active schedules
-		for _, schedule := range ts.context.schedules {
-			if schedule.Trigger.Name == ts.Trigger.Name {
-				continue
-			}
-
-			// Check if this schedule is active and has higher priority
-			scheduleState, err := schedule.isWithinTimeWindow(nowFunc())
-			if err != nil {
-				klog.Errorf("Failed to check time window for schedule %s: %v", schedule.Trigger.Name, err)
-				continue
-			}
-
-			if scheduleState == Within {
-				schedulePriority := 0
-				if schedule.Trigger.Priority != nil {
-					schedulePriority = *schedule.Trigger.Priority
-				}
-
-				if schedulePriority > thisPriority {
-					higherPriorityActive = true
-					break
-				}
-			}
-		}
-
-		// Only apply configuration if no higher priority schedule is active
-		if !higherPriorityActive {
+		if ts.Trigger.StartHPAConfig != nil {
 			if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
-				klog.Errorf("Failed to update HPA config for trigger %s: %v", ts.Trigger.Name, err)
+				logger.Error(err, "failed to apply start config")
 			}
 		}
-	} else if state == After {
-		// If we're after the time window, apply the end config
+	case After:
 		if ts.Trigger.EndHPAConfig != nil {
 			if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
-				klog.Errorf("Failed to apply end config for trigger %s: %v", ts.Trigger.Name, err)
+				logger.Error(err, "failed to apply end config")
 			}
 		}
 	}
+}
 
-	// Schedule start and end times
+// hasHigherPriorityActive checks if any other active schedule has higher priority.
+func (ts *TriggerSchedule) hasHigherPriorityActive() bool {
+	thisPriority := getPriority(ts.Trigger)
+
+	for _, schedule := range ts.context.schedules {
+		if schedule.Trigger.Name == ts.Trigger.Name {
+			continue
+		}
+
+		scheduleState, err := schedule.isWithinTimeWindow(nowFunc())
+		if err != nil {
+			log.Error(err, "failed to check time window", "schedule", schedule.Trigger.Name)
+			continue
+		}
+
+		if scheduleState == Within && getPriority(schedule.Trigger) > thisPriority {
+			return true
+		}
+	}
+	return false
+}
+
+// scheduleCronJobs adds the start and end cron jobs for the trigger.
+func (ts *TriggerSchedule) scheduleCronJobs(logger interface{ Info(string, ...interface{}) }) error {
 	startCron, err := ts.GetCronTab(ts.Trigger.StartTime)
 	if err != nil {
-		klog.Errorf("Failed to get start cron tab for trigger %s: %v", ts.Trigger.Name, err)
-		return
+		return fmt.Errorf("failed to get start cron: %w", err)
 	}
 
 	endCron, err := ts.GetCronTab(ts.Trigger.EndTime)
 	if err != nil {
-		klog.Errorf("Failed to get end cron tab for trigger %s: %v", ts.Trigger.Name, err)
-		return
+		return fmt.Errorf("failed to get end cron: %w", err)
 	}
 
-	klog.Infof("Scheduling trigger %s from %s to %s", ts.Trigger.Name, startCron, endCron)
+	log.Info("scheduling cron jobs", "trigger", ts.Trigger.Name, "startCron", startCron, "endCron", endCron)
 
 	// Add start cron job
-	_, err = ts.cron.AddFunc(startCron, func() {
-		klog.Infof("Starting trigger %s", ts.Trigger.Name)
-		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
-			klog.Errorf("Failed to apply start config for trigger %s: %v", ts.Trigger.Name, err)
-		}
-	})
-	if err != nil {
-		klog.Errorf("Failed to add start cron for trigger %s: %v", ts.Trigger.Name, err)
-		return
+	if _, err := ts.cron.AddFunc(startCron, ts.onStart); err != nil {
+		return fmt.Errorf("failed to add start cron: %w", err)
 	}
 
 	// Add end cron job
-	_, err = ts.cron.AddFunc(endCron, func() {
-		klog.Infof("Ending trigger %s", ts.Trigger.Name)
-		if ts.Trigger.EndHPAConfig != nil {
-			if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
-				klog.Errorf("Failed to apply end config for trigger %s: %v", ts.Trigger.Name, err)
-			}
-		}
-		// Find and apply next highest priority config
-		if ts.context != nil {
-			ts.context.applyNextHighestPriorityConfig(ts)
-		}
-	})
-	if err != nil {
-		klog.Errorf("Failed to add end cron for trigger %s: %v", ts.Trigger.Name, err)
-		return
+	if _, err := ts.cron.AddFunc(endCron, ts.onEnd); err != nil {
+		return fmt.Errorf("failed to add end cron: %w", err)
 	}
-
-	// Start the cron scheduler
-	ts.cron.Start()
-}
-
-func (ts *TriggerSchedule) UpdateHPAConfig(config sarabalaiov1alpha1.HPAConfig) error {
-	klog.Infof("Updating HPA %s with config %v", ts.HPANamespacedName.String(), config)
-	// Get the HPA object
-	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	err := ts.client.Get(context.Background(), ts.HPANamespacedName, hpa)
-	klog.Infof("Got HPA %s", hpa.String())
-	if err != nil {
-		klog.Errorf("Failed to get HPA %s: %v", ts.HPANamespacedName.String(), err)
-		return err
-	}
-
-	// Create a copy of the HPA for updates
-	hpaCopy := hpa.DeepCopy()
-
-	// Update the HPA spec with new values
-	if config.MinReplicas != nil {
-		if *config.MinReplicas < 0 {
-			return fmt.Errorf("minReplicas cannot be negative")
-		}
-		hpaCopy.Spec.MinReplicas = config.MinReplicas
-	}
-	if config.MaxReplicas != nil {
-		if *config.MaxReplicas <= 0 {
-			return fmt.Errorf("maxReplicas must be greater than 0")
-		}
-		hpaCopy.Spec.MaxReplicas = *config.MaxReplicas
-	}
-
-	// Validate min <= max
-	if hpaCopy.Spec.MinReplicas != nil && *hpaCopy.Spec.MinReplicas > hpaCopy.Spec.MaxReplicas {
-		return fmt.Errorf("minReplicas (%d) cannot be greater than maxReplicas (%d)", *hpaCopy.Spec.MinReplicas, hpaCopy.Spec.MaxReplicas)
-	}
-	//add log
-	klog.Infof("Validated min=%v, max=%v", hpaCopy.Spec.MinReplicas, hpaCopy.Spec.MaxReplicas)
-	// Update the HPA object
-	err = ts.client.Update(context.Background(), hpaCopy)
-	if err != nil {
-		klog.Errorf("Failed to update HPA %s: %v", ts.HPANamespacedName.String(), err)
-		return err
-	}
-
-	klog.Infof("Successfully updated HPA %s with min=%v, max=%v",
-		ts.HPANamespacedName.String(),
-		hpaCopy.Spec.MinReplicas,
-		hpaCopy.Spec.MaxReplicas)
 
 	return nil
 }
 
-// applyNextHighestPriorityConfig finds and applies the next highest priority active schedule
+// onStart is called when the trigger's start time is reached.
+func (ts *TriggerSchedule) onStart() {
+	logger := log.WithValues("trigger", ts.Trigger.Name)
+	logger.Info("trigger started")
+
+	if ts.Trigger.StartHPAConfig != nil {
+		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
+			logger.Error(err, "failed to apply start config")
+		}
+	}
+}
+
+// onEnd is called when the trigger's end time is reached.
+func (ts *TriggerSchedule) onEnd() {
+	logger := log.WithValues("trigger", ts.Trigger.Name)
+	logger.Info("trigger ended")
+
+	if ts.Trigger.EndHPAConfig != nil {
+		if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
+			logger.Error(err, "failed to apply end config")
+		}
+	}
+
+	// Find and apply next highest priority config
+	if ts.context != nil {
+		ts.context.applyNextHighestPriorityConfig(ts)
+	}
+}
+
+// UpdateHPAConfig updates the HPA with the given configuration.
+func (ts *TriggerSchedule) UpdateHPAConfig(config autoscalingv1alpha1.HPAConfig) error {
+	return ts.UpdateHPAConfigWithContext(context.Background(), config)
+}
+
+// UpdateHPAConfigWithContext updates the HPA with the given configuration using the provided context.
+func (ts *TriggerSchedule) UpdateHPAConfigWithContext(ctx context.Context, config autoscalingv1alpha1.HPAConfig) error {
+	logger := log.WithValues("hpa", ts.HPANamespacedName)
+	logger.V(1).Info("updating HPA config", "config", config)
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+	if err := ts.client.Get(ctx, ts.HPANamespacedName, hpa); err != nil {
+		return fmt.Errorf("failed to get HPA: %w", err)
+	}
+
+	hpaCopy := hpa.DeepCopy()
+
+	// Validate and apply configuration
+	if err := applyHPAConfig(hpaCopy, config); err != nil {
+		return err
+	}
+
+	logger.V(1).Info("validated config", "minReplicas", hpaCopy.Spec.MinReplicas, "maxReplicas", hpaCopy.Spec.MaxReplicas)
+
+	if err := ts.client.Update(ctx, hpaCopy); err != nil {
+		return fmt.Errorf("failed to update HPA: %w", err)
+	}
+
+	logger.Info("successfully updated HPA",
+		"minReplicas", hpaCopy.Spec.MinReplicas,
+		"maxReplicas", hpaCopy.Spec.MaxReplicas)
+
+	return nil
+}
+
+// applyHPAConfig validates and applies the config to the HPA spec.
+func applyHPAConfig(hpa *autoscalingv2.HorizontalPodAutoscaler, config autoscalingv1alpha1.HPAConfig) error {
+	if config.MinReplicas != nil {
+		if *config.MinReplicas < 0 {
+			return fmt.Errorf("minReplicas cannot be negative")
+		}
+		hpa.Spec.MinReplicas = config.MinReplicas
+	}
+
+	if config.MaxReplicas != nil {
+		if *config.MaxReplicas <= 0 {
+			return fmt.Errorf("maxReplicas must be greater than 0")
+		}
+		hpa.Spec.MaxReplicas = *config.MaxReplicas
+	}
+
+	// Validate min <= max
+	if hpa.Spec.MinReplicas != nil && *hpa.Spec.MinReplicas > hpa.Spec.MaxReplicas {
+		return fmt.Errorf("minReplicas (%d) cannot be greater than maxReplicas (%d)",
+			*hpa.Spec.MinReplicas, hpa.Spec.MaxReplicas)
+	}
+
+	return nil
+}
+
+// applyNextHighestPriorityConfig finds and applies the next highest priority active schedule.
 func (c *SmartHPAContext) applyNextHighestPriorityConfig(currentSchedule *TriggerSchedule) {
-	// Get all active schedules sorted by priority
+	activeSchedules := c.getActiveSchedulesSortedByPriority(currentSchedule.Trigger.Name)
+
+	if len(activeSchedules) > 0 {
+		topSchedule := activeSchedules[0]
+		log.Info("applying next highest priority config", "schedule", topSchedule.Trigger.Name)
+
+		if topSchedule.Trigger.StartHPAConfig != nil {
+			if err := topSchedule.UpdateHPAConfig(*topSchedule.Trigger.StartHPAConfig); err != nil {
+				log.Error(err, "failed to apply config", "schedule", topSchedule.Trigger.Name)
+			}
+		}
+		return
+	}
+
+	// No active schedules, apply the default config
+	log.V(1).Info("no active schedules found, applying default config")
+	if currentSchedule.Trigger.EndHPAConfig != nil {
+		if err := currentSchedule.UpdateHPAConfig(*currentSchedule.Trigger.EndHPAConfig); err != nil {
+			log.Error(err, "failed to apply default config")
+		}
+	}
+}
+
+// getActiveSchedulesSortedByPriority returns active schedules sorted by priority (highest first).
+func (c *SmartHPAContext) getActiveSchedulesSortedByPriority(excludeName string) []*TriggerSchedule {
 	var activeSchedules []*TriggerSchedule
+
 	for _, schedule := range c.schedules {
-		if schedule.Trigger.Name == currentSchedule.Trigger.Name {
+		if schedule.Trigger.Name == excludeName {
 			continue
 		}
 
-		// Check if schedule is currently active
 		state, err := schedule.isWithinTimeWindow(nowFunc())
 		if err != nil {
-			klog.Errorf("Failed to check time window for schedule %s: %v", schedule.Trigger.Name, err)
+			log.Error(err, "failed to check time window", "schedule", schedule.Trigger.Name)
 			continue
 		}
 
@@ -490,101 +585,59 @@ func (c *SmartHPAContext) applyNextHighestPriorityConfig(currentSchedule *Trigge
 		}
 	}
 
-	// Sort schedules by priority (highest first)
+	// Sort by priority (highest first)
 	sort.Slice(activeSchedules, func(i, j int) bool {
-		iPriority := 0
-		if activeSchedules[i].Trigger.Priority != nil {
-			iPriority = *activeSchedules[i].Trigger.Priority
-		}
-
-		jPriority := 0
-		if activeSchedules[j].Trigger.Priority != nil {
-			jPriority = *activeSchedules[j].Trigger.Priority
-		}
-
-		return iPriority > jPriority
+		return getPriority(activeSchedules[i].Trigger) > getPriority(activeSchedules[j].Trigger)
 	})
 
-	// Apply the highest priority active schedule's config
-	if len(activeSchedules) > 0 {
-		klog.Infof("Applying next highest priority config from schedule %s", activeSchedules[0].Trigger.Name)
-		if err := activeSchedules[0].UpdateHPAConfig(*activeSchedules[0].Trigger.StartHPAConfig); err != nil {
-			klog.Errorf("Failed to apply config from schedule %s: %v", activeSchedules[0].Trigger.Name, err)
-		}
-	} else {
-		// If no active schedules, apply the default config
-		klog.Infof("No active schedules found, applying default config")
-		if currentSchedule.Trigger.EndHPAConfig != nil {
-			if err := currentSchedule.UpdateHPAConfig(*currentSchedule.Trigger.EndHPAConfig); err != nil {
-				klog.Errorf("Failed to apply default config: %v", err)
-			}
-		}
-	}
+	return activeSchedules
 }
 
+// execute processes all schedules in priority order.
 func (sc *SmartHPAContext) execute(ctx context.Context) {
-	// Get a safe copy of schedules
-	sc.mutex.RLock()
-	schedulesCopy := make(map[string]*TriggerSchedule, len(sc.schedules))
-	for k, v := range sc.schedules {
-		schedulesCopy[k] = v
-	}
-	sc.mutex.RUnlock()
+	schedulesCopy := sc.GetSchedules()
+	log.Info("executing SmartHPAContext", "scheduleCount", len(schedulesCopy))
 
-	klog.Infof("Executing SmartHPAContext with %d schedules", len(schedulesCopy))
-
-	// Create a slice of schedules for sorting by priority
+	// Build list of active schedules
 	var activeSchedules []*TriggerSchedule
 	for _, schedule := range schedulesCopy {
-		// Set the context reference for priority handling
 		schedule.mutex.Lock()
 		schedule.context = sc
 		schedule.mutex.Unlock()
-		klog.Infof("schedule.Trigger.NeedRecurring()=%v", schedule.Trigger.NeedRecurring())
+
 		if schedule.Trigger != nil && schedule.Trigger.NeedRecurring() {
 			activeSchedules = append(activeSchedules, schedule)
 		}
 	}
 
-	// Sort schedules by priority (highest to lowest)
+	// Sort by priority (highest first)
 	sort.Slice(activeSchedules, func(i, j int) bool {
-		// Handle nil priority values
-		iPriority := 0
-		if activeSchedules[i].Trigger.Priority != nil {
-			iPriority = *activeSchedules[i].Trigger.Priority
-		}
-		jPriority := 0
-		if activeSchedules[j].Trigger.Priority != nil {
-			jPriority = *activeSchedules[j].Trigger.Priority
-		}
-		return iPriority > jPriority
+		return getPriority(activeSchedules[i].Trigger) > getPriority(activeSchedules[j].Trigger)
 	})
 
-	// Process schedules in priority order
+	// Process schedules in priority order (deduplicated)
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
-	klog.Infof("iterating activeschedules, %v", activeSchedules)
-	schedulemap := make(map[string]bool)
+
+	processed := make(map[string]bool)
 	for _, schedule := range activeSchedules {
-		//log
-		klog.Infof("trigger name=%s", schedule.Trigger.Name)
-		if schedulemap[schedule.Trigger.Name] {
+		if processed[schedule.Trigger.Name] {
 			continue
 		}
-		priority := 0
-		if schedule.Trigger.Priority != nil {
-			priority = *schedule.Trigger.Priority
-		}
-		klog.Infof("Executing schedule %s with priority %d", schedule.Trigger.Name, priority)
-		schedulemap[schedule.Trigger.Name] = true
+
+		log.V(1).Info("executing schedule",
+			"trigger", schedule.Trigger.Name,
+			"priority", getPriority(schedule.Trigger))
+
+		processed[schedule.Trigger.Name] = true
 		schedule.Schedule()
 	}
 
-	// Add a recurring job to refresh the context daily
+	// Add daily refresh job
 	if _, err := sc.cron.AddFunc("0 0 * * *", func() {
-		klog.Infof("Daily refresh: Executing SmartHPAContext with %d schedules", len(sc.schedules))
+		log.V(1).Info("daily refresh triggered", "scheduleCount", len(sc.schedules))
 		sc.execute(ctx)
 	}); err != nil {
-		klog.Errorf("Failed to add daily refresh cron: %v", err)
+		log.Error(err, "failed to add daily refresh cron")
 	}
 }
