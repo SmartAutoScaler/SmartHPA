@@ -22,13 +22,28 @@ spec:
       minReplicas: 1
       maxReplicas: 3
   - name: weekend-scale-down
-    priority: 50
+    priority: 53
     timezone: "America/Los_Angeles"
     interval:
       recurring: "SAT,SUN"
+    startTime: "00:00:00"
+    endTime: "23:59:59"
     startHPAConfig:
+      minReplicas: 3
+      maxReplicas: 10
+    endHPAConfig:
       minReplicas: 1
       maxReplicas: 2
+  - name: weekend-scale-down-1
+    priority: 52
+    timezone: "America/Los_Angeles"
+    interval:
+      recurring: "SAT,SUN"
+    startTime: "00:00:00"
+    endTime: "23:59:59"
+    startHPAConfig:
+      minReplicas: 4
+      maxReplicas: 10
     endHPAConfig:
       minReplicas: 1
       maxReplicas: 2

@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smarthpa-users
+  namespace: default
+data:
+  # User authentication and RBAC configuration
+  # Permission format: Unix-style (like 777)
+  #   First digit: SmartHPA operations
+  #     7 = full access (read + write + delete)
+  #     6 = read + write (no delete)
+  #     5 = read + delete (no write)
+  #     4 = read only
+  #     0 = no access
+  #
+  # Example permissions:
+  #   7 = Admin (full access)
+  #   6 = Editor (can create/edit, cannot delete)
+  #   4 = Viewer (read only)
+  #   0 = No access
+  users.json: |
+    {
+      "admin": {
+        "password": "admin123",
+        "permission": 7,
+        "displayName": "Administrator"
+      },
+      "editor": {
+        "password": "editor123",
+        "permission": 6,
+        "displayName": "Editor User"
+      },
+      "viewer": {
+        "password": "viewer123",
+        "permission": 4,
+        "displayName": "Viewer User"
+      }
+    }
+

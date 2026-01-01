@@ -67,3 +67,5 @@ echo "   - Add e2e tests for complete workflows"
 echo ""
 echo "🌐 Open cover.html in your browser for detailed coverage analysis"
 
+
+

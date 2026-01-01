@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"k8s.io/apimachinery/pkg/types"
+
 	autoscalingv1alpha1 "github.com/sarabala1979/SmartHPA/api/v1alpha1"
 )
 
@@ -17,4 +19,10 @@ type SchedulerInterface interface {
 
 	// GetActiveSchedules returns all currently active schedules.
 	GetActiveSchedules() []*TriggerSchedule
+
+	// RemoveContext removes the scheduler context for a SmartHPA (cleanup on delete)
+	RemoveContext(key types.NamespacedName)
+
+	// RefreshContext forces a refresh of the scheduler context (for spec updates)
+	RefreshContext(key types.NamespacedName)
 }

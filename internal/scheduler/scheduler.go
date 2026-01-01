@@ -24,6 +24,8 @@ const (
 	defaultWorkerCount = 10
 	// stopGracePeriod is the time to wait for goroutines during shutdown.
 	stopGracePeriod = 50 * time.Millisecond
+	// DefaultQueueSize is the default buffer size for the scheduler queue
+	DefaultQueueSize = 100
 )
 
 // TriggerSchedule represents a scheduled trigger with its HPA configuration.
@@ -48,15 +50,20 @@ const (
 
 // SmartHPAContext holds the schedules for a single SmartHPA resource.
 type SmartHPAContext struct {
-	schedules map[string]*TriggerSchedule
-	cron      *cron.Cron
-	mutex     sync.RWMutex // Protects schedules map
+	schedules          map[string]*TriggerSchedule
+	cron               *cron.Cron
+	mutex              sync.RWMutex // Protects schedules map
+	generation         int64        // Track the generation to detect spec changes
+	cancelFunc         context.CancelFunc
+	smartHPAKey        types.NamespacedName
+	activeTriggerName  string       // Name of the currently active (highest priority) trigger
+	activeTriggerMutex sync.RWMutex // Protects activeTriggerName
 }
 
 // Scheduler manages the scheduling of HPA configurations
 type Scheduler struct {
 	client   client.Client
-	contexts map[types.NamespacedName]*SmartHPAContext // key: namespace/nam
+	contexts map[types.NamespacedName]*SmartHPAContext // key: namespace/name
 	queue    chan types.NamespacedName
 	done     chan struct{}
 	mutex    sync.RWMutex // Protects contexts map
@@ -70,6 +77,11 @@ func NewScheduler(client client.Client, queue chan types.NamespacedName) *Schedu
 		queue:    queue,
 		done:     make(chan struct{}),
 	}
+}
+
+// NewSchedulerQueue creates a buffered channel for the scheduler queue
+func NewSchedulerQueue() chan types.NamespacedName {
+	return make(chan types.NamespacedName, DefaultQueueSize)
 }
 
 // ProcessItem processes SmartHPA items from the queue and sets up their schedules.
@@ -96,6 +108,12 @@ func (s *Scheduler) processSmartHPA(ctx context.Context, item types.NamespacedNa
 
 	var obj autoscalingv1alpha1.SmartHorizontalPodAutoscaler
 	if err := s.client.Get(ctx, item, &obj); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			// Object was deleted, remove context if exists
+			logger.V(1).Info("SmartHPA not found, removing context if exists")
+			s.RemoveContext(item)
+			return
+		}
 		logger.Error(err, "failed to get SmartHPA")
 		return
 	}
@@ -107,29 +125,62 @@ func (s *Scheduler) processSmartHPA(ctx context.Context, item types.NamespacedNa
 	}
 
 	s.mutex.RLock()
-	hpaContext := s.contexts[item]
+	existingContext := s.contexts[item]
 	s.mutex.RUnlock()
 
-	if hpaContext == nil {
-		hpaContext = s.initializeContext(ctx, &obj)
+	// Check if we need to rebuild the context (new or spec changed)
+	needsRebuild := existingContext == nil || existingContext.generation != obj.Generation
+
+	if needsRebuild {
+		// Stop and remove old context if exists
+		if existingContext != nil {
+			logger.Info("SmartHPA spec changed, rebuilding schedules",
+				"oldGeneration", existingContext.generation,
+				"newGeneration", obj.Generation)
+			existingContext.stop()
+		}
+
+		// Create new context
+		hpaContext := s.initializeContext(ctx, &obj)
 		s.mutex.Lock()
 		s.contexts[item] = hpaContext
 		s.mutex.Unlock()
-	}
 
-	hpaContext.cron.Start()
-	go hpaContext.execute(ctx)
+		hpaContext.cron.Start()
+		go hpaContext.execute(ctx)
+
+		logger.Info("Created/rebuilt scheduler context", "generation", obj.Generation)
+	} else {
+		logger.V(1).Info("SmartHPA unchanged, skipping rebuild", "generation", obj.Generation)
+	}
 }
 
 // initializeContext creates a new SmartHPAContext with schedules for all triggers.
 func (s *Scheduler) initializeContext(ctx context.Context, obj *autoscalingv1alpha1.SmartHorizontalPodAutoscaler) *SmartHPAContext {
+	_, cancel := context.WithCancel(ctx)
+
 	hpaContext := &SmartHPAContext{
-		schedules: make(map[string]*TriggerSchedule),
-		cron:      cron.New(),
+		schedules:   make(map[string]*TriggerSchedule),
+		cron:        cron.New(),
+		generation:  obj.Generation,
+		cancelFunc:  cancel,
+		smartHPAKey: types.NamespacedName{Name: obj.Name, Namespace: obj.Namespace},
+	}
+
+	hpaNamespace := obj.Spec.HPAObjectRef.Namespace
+	if hpaNamespace == "" {
+		hpaNamespace = obj.Namespace
 	}
 
 	for i := range obj.Spec.Triggers {
 		trigger := &obj.Spec.Triggers[i]
+
+		// Skip suspended triggers
+		if trigger.Suspend {
+			log.V(1).Info("Skipping suspended trigger", "trigger", trigger.Name)
+			continue
+		}
+
 		loc := loadTimezone(trigger.Timezone)
 
 		schedule := &TriggerSchedule{
@@ -137,7 +188,7 @@ func (s *Scheduler) initializeContext(ctx context.Context, obj *autoscalingv1alp
 			Trigger: trigger,
 			cron:    cron.New(cron.WithLocation(loc)),
 			HPANamespacedName: types.NamespacedName{
-				Namespace: obj.Spec.HPAObjectRef.Namespace,
+				Namespace: hpaNamespace,
 				Name:      obj.Spec.HPAObjectRef.Name,
 			},
 			context: hpaContext,
@@ -177,12 +228,41 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the scheduler and cleans up resources
 // GetContext safely retrieves a context by key
 func (s *Scheduler) GetContext(key types.NamespacedName) *SmartHPAContext {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.contexts[key]
+}
+
+// RemoveContext removes and stops the scheduler context for a SmartHPA
+// This is called when a SmartHPA is deleted
+func (s *Scheduler) RemoveContext(key types.NamespacedName) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	hpaCtx, exists := s.contexts[key]
+	if !exists {
+		log.V(1).Info("No context to remove", "key", key)
+		return
+	}
+
+	log.Info("Removing scheduler context", "key", key)
+	hpaCtx.stop()
+	delete(s.contexts, key)
+}
+
+// RefreshContext forces a refresh of the scheduler context for a SmartHPA
+// This is called when a SmartHPA spec is updated
+func (s *Scheduler) RefreshContext(key types.NamespacedName) {
+	// Simply enqueue the item for reprocessing
+	// The processSmartHPA function will detect the generation change and rebuild
+	select {
+	case s.queue <- key:
+		log.V(1).Info("Enqueued context refresh", "key", key)
+	default:
+		log.Info("Queue full, context refresh may be delayed", "key", key)
+	}
 }
 
 // GetSchedules safely retrieves the schedules map
@@ -196,6 +276,30 @@ func (c *SmartHPAContext) GetSchedules() map[string]*TriggerSchedule {
 		schedulesCopy[k] = v
 	}
 	return schedulesCopy
+}
+
+// GetActiveTriggerName returns the name of the currently active (highest priority) trigger
+func (c *SmartHPAContext) GetActiveTriggerName() string {
+	c.activeTriggerMutex.RLock()
+	defer c.activeTriggerMutex.RUnlock()
+	return c.activeTriggerName
+}
+
+// setActiveTrigger updates the currently active trigger
+func (c *SmartHPAContext) setActiveTrigger(name string, priority int) {
+	c.activeTriggerMutex.Lock()
+	defer c.activeTriggerMutex.Unlock()
+	c.activeTriggerName = name
+	log.Info("Active trigger changed", "smartHPA", c.smartHPAKey, "trigger", name, "priority", priority)
+}
+
+// GetHighestPriorityActiveTrigger returns the current highest priority active trigger
+func (c *SmartHPAContext) GetHighestPriorityActiveTrigger() *TriggerSchedule {
+	activeSchedules := c.getActiveSchedulesSortedByPriority("")
+	if len(activeSchedules) > 0 {
+		return activeSchedules[0]
+	}
+	return nil
 }
 
 // Stop gracefully stops the scheduler and cleans up all resources.
@@ -217,7 +321,8 @@ func (s *Scheduler) Stop() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	for _, hpaCtx := range s.contexts {
+	for key, hpaCtx := range s.contexts {
+		log.V(1).Info("Stopping context", "key", key)
 		hpaCtx.stop()
 	}
 
@@ -228,6 +333,11 @@ func (s *Scheduler) Stop() {
 
 // stop stops all cron jobs in the context.
 func (c *SmartHPAContext) stop() {
+	// Cancel context-specific goroutines
+	if c.cancelFunc != nil {
+		c.cancelFunc()
+	}
+
 	if c.cron != nil {
 		c.cron.Stop()
 	}
@@ -283,9 +393,10 @@ func (ts *TriggerSchedule) GetCronTab(timeStr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Return in the format that matches the test expectation
 	// Format: minute hour day month weekday
-	return fmt.Sprintf("%d %d * * *", t.Minute(), t.Hour()), nil
+	// Use the trigger's recurring weekdays for the weekday field
+	weekdays := ts.Trigger.GetCronWeekdays()
+	return fmt.Sprintf("%d %d * * %s", t.Minute(), t.Hour(), weekdays), nil
 }
 
 // isWithinTimeWindow checks if the given time falls within the trigger's time window.
@@ -380,7 +491,8 @@ func (ts *TriggerSchedule) Schedule() {
 
 // applyInitialConfig applies the initial HPA configuration based on the current time window state.
 func (ts *TriggerSchedule) applyInitialConfig(state TimeWindowState) {
-	logger := log.WithValues("trigger", ts.Trigger.Name)
+	thisPriority := getPriority(ts.Trigger)
+	logger := log.WithValues("trigger", ts.Trigger.Name, "priority", thisPriority, "state", state)
 
 	switch state {
 	case Within:
@@ -388,13 +500,27 @@ func (ts *TriggerSchedule) applyInitialConfig(state TimeWindowState) {
 			logger.V(1).Info("higher priority schedule active, skipping config application")
 			return
 		}
+		// This is the highest priority active trigger at startup
+		if ts.context != nil {
+			ts.context.setActiveTrigger(ts.Trigger.Name, thisPriority)
+		}
 		if ts.Trigger.StartHPAConfig != nil {
+			logger.Info("applying initial start config (highest active priority)")
 			if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
 				logger.Error(err, "failed to apply start config")
 			}
 		}
 	case After:
+		// Only apply end config if no other triggers are active
+		if ts.context != nil {
+			activeSchedules := ts.context.getActiveSchedulesSortedByPriority(ts.Trigger.Name)
+			if len(activeSchedules) > 0 {
+				logger.V(1).Info("other schedules are active, not applying end config")
+				return
+			}
+		}
 		if ts.Trigger.EndHPAConfig != nil {
+			logger.V(1).Info("applying initial end config (no active schedules)")
 			if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
 				logger.Error(err, "failed to apply end config")
 			}
@@ -453,10 +579,24 @@ func (ts *TriggerSchedule) scheduleCronJobs(logger interface{ Info(string, ...in
 
 // onStart is called when the trigger's start time is reached.
 func (ts *TriggerSchedule) onStart() {
-	logger := log.WithValues("trigger", ts.Trigger.Name)
+	thisPriority := getPriority(ts.Trigger)
+	logger := log.WithValues("trigger", ts.Trigger.Name, "priority", thisPriority)
 	logger.Info("trigger started")
 
+	// Check if a higher priority schedule is already active
+	// If so, don't apply this trigger's config - let the higher priority one remain in effect
+	if ts.hasHigherPriorityActive() {
+		logger.Info("higher priority schedule is active, not applying this trigger's config")
+		return
+	}
+
+	// This is now the highest priority active trigger
+	if ts.context != nil {
+		ts.context.setActiveTrigger(ts.Trigger.Name, thisPriority)
+	}
+
 	if ts.Trigger.StartHPAConfig != nil {
+		logger.Info("applying start config (highest active priority)")
 		if err := ts.UpdateHPAConfig(*ts.Trigger.StartHPAConfig); err != nil {
 			logger.Error(err, "failed to apply start config")
 		}
@@ -465,18 +605,49 @@ func (ts *TriggerSchedule) onStart() {
 
 // onEnd is called when the trigger's end time is reached.
 func (ts *TriggerSchedule) onEnd() {
-	logger := log.WithValues("trigger", ts.Trigger.Name)
+	thisPriority := getPriority(ts.Trigger)
+	logger := log.WithValues("trigger", ts.Trigger.Name, "priority", thisPriority)
 	logger.Info("trigger ended")
 
+	// Find the next highest priority active schedule
+	// This determines what config should be applied now
+	if ts.context != nil {
+		activeSchedules := ts.context.getActiveSchedulesSortedByPriority(ts.Trigger.Name)
+
+		if len(activeSchedules) > 0 {
+			topSchedule := activeSchedules[0]
+			topPriority := getPriority(topSchedule.Trigger)
+
+			if topPriority > thisPriority {
+				// A higher priority schedule is still active - it should remain in control
+				// Don't apply our end config, don't change anything
+				logger.Info("higher priority schedule still active, not applying end config",
+					"activeSchedule", topSchedule.Trigger.Name,
+					"activePriority", topPriority)
+				return
+			}
+
+			// Apply the next highest priority schedule's config and track it
+			logger.Info("applying next highest priority config", "schedule", topSchedule.Trigger.Name)
+			ts.context.setActiveTrigger(topSchedule.Trigger.Name, topPriority)
+			if topSchedule.Trigger.StartHPAConfig != nil {
+				if err := topSchedule.UpdateHPAConfig(*topSchedule.Trigger.StartHPAConfig); err != nil {
+					logger.Error(err, "failed to apply config", "schedule", topSchedule.Trigger.Name)
+				}
+			}
+			return
+		}
+
+		// No other active schedules - clear active trigger
+		ts.context.setActiveTrigger("", 0)
+	}
+
+	// No other active schedules, apply this trigger's end config as default
+	logger.Info("no other active schedules, applying end config as default")
 	if ts.Trigger.EndHPAConfig != nil {
 		if err := ts.UpdateHPAConfig(*ts.Trigger.EndHPAConfig); err != nil {
 			logger.Error(err, "failed to apply end config")
 		}
-	}
-
-	// Find and apply next highest priority config
-	if ts.context != nil {
-		ts.context.applyNextHighestPriorityConfig(ts)
 	}
 }
 
@@ -546,8 +717,10 @@ func (c *SmartHPAContext) applyNextHighestPriorityConfig(currentSchedule *Trigge
 
 	if len(activeSchedules) > 0 {
 		topSchedule := activeSchedules[0]
-		log.Info("applying next highest priority config", "schedule", topSchedule.Trigger.Name)
+		topPriority := getPriority(topSchedule.Trigger)
+		log.Info("applying next highest priority config", "schedule", topSchedule.Trigger.Name, "priority", topPriority)
 
+		c.setActiveTrigger(topSchedule.Trigger.Name, topPriority)
 		if topSchedule.Trigger.StartHPAConfig != nil {
 			if err := topSchedule.UpdateHPAConfig(*topSchedule.Trigger.StartHPAConfig); err != nil {
 				log.Error(err, "failed to apply config", "schedule", topSchedule.Trigger.Name)
@@ -556,8 +729,9 @@ func (c *SmartHPAContext) applyNextHighestPriorityConfig(currentSchedule *Trigge
 		return
 	}
 
-	// No active schedules, apply the default config
+	// No active schedules, clear active trigger and apply the default config
 	log.V(1).Info("no active schedules found, applying default config")
+	c.setActiveTrigger("", 0)
 	if currentSchedule.Trigger.EndHPAConfig != nil {
 		if err := currentSchedule.UpdateHPAConfig(*currentSchedule.Trigger.EndHPAConfig); err != nil {
 			log.Error(err, "failed to apply default config")
@@ -596,16 +770,17 @@ func (c *SmartHPAContext) getActiveSchedulesSortedByPriority(excludeName string)
 // execute processes all schedules in priority order.
 func (sc *SmartHPAContext) execute(ctx context.Context) {
 	schedulesCopy := sc.GetSchedules()
-	log.Info("executing SmartHPAContext", "scheduleCount", len(schedulesCopy))
+	log.Info("executing SmartHPAContext", "scheduleCount", len(schedulesCopy), "smartHPA", sc.smartHPAKey)
 
-	// Build list of active schedules
+	// Build list of all schedules with valid intervals (not just today's matches)
 	var activeSchedules []*TriggerSchedule
 	for _, schedule := range schedulesCopy {
 		schedule.mutex.Lock()
 		schedule.context = sc
 		schedule.mutex.Unlock()
 
-		if schedule.Trigger != nil && schedule.Trigger.NeedRecurring() {
+		// Schedule all triggers with valid intervals - cron will handle day filtering
+		if schedule.Trigger != nil && schedule.Trigger.HasValidInterval() {
 			activeSchedules = append(activeSchedules, schedule)
 		}
 	}

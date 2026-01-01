@@ -19,7 +19,19 @@ SmartHPA provides intelligent pod scaling based on time windows, recurring sched
 - **Recurring Schedules**: Set up recurring schedules (e.g., business hours, weekends)
 - **Flexible Configuration**: Configure min replicas, max replicas, and desired replicas for each time window
 - **Multiple Triggers**: Define multiple triggers with different schedules and configurations
-- **AI-Powered Scheduling**: AI/ML algorithms automatically generate optimal scaling schedules based on application metrics and traffic patterns
+- **Priority-based Overlap Resolution**: Higher priority triggers take precedence during overlapping time windows
+- **Web UI**: Manage SmartHPA resources through an intuitive web interface
+- **AI-Powered Scheduling** 🚧: ML algorithms automatically generate optimal scaling schedules (in progress)
+
+## Features
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Controller | ✅ Ready | Core SmartHPA controller with time-based scaling |
+| Web UI | ✅ Ready | Web interface for CRUD operations on SmartHPA |
+| User Auth | ✅ Ready | Login with RBAC permissions (ConfigMap-based) |
+| ML Service | 🚧 In Progress | Auto-generate triggers from Prometheus metrics |
+| AI Scheduler | 🚧 Planned | Fully automated DFY scaling |
 
 ## Container Image
 
@@ -31,50 +43,133 @@ quay.io/sarabala1979/smarthpa:latest
 
 You can also use specific version tags like `v1.0.0` or `v1.0`.
 
-## Getting Started
+## Quick Start
 
 ### Prerequisites
 - Kubernetes cluster v1.11.3+
 - kubectl version v1.11.3+
 
-### Quick Installation
+### 1. Install the Controller
 
-To quickly install SmartHPA in your cluster:
+**Option A: One-line installation**
+```sh
+kubectl apply -f https://raw.githubusercontent.com/sarabala1979/SmartHPA/main/install.yaml
+```
 
+**Option B: Using local file**
 ```sh
 kubectl apply -f install.yaml
 ```
 
-This will install:
+This installs:
 - SmartHPA Custom Resource Definition (CRD)
 - RBAC configurations (ServiceAccount, ClusterRole, ClusterRoleBinding)
 - SmartHPA controller deployment
 
-### Development Setup
+**Verify installation:**
+```sh
+kubectl get pods -n smarthpa-system
+kubectl get crd smarthorizontalpodautoscalers.autoscaling.sarabala.io
+```
+
+### 2. Create Your First SmartHPA
+
+```sh
+# Apply the example HPA and SmartHPA
+kubectl apply -f config/samples/example-hpa.yaml
+```
+
+### 3. Start the UI (Optional)
+
+The SmartHPA UI provides a web interface for managing SmartHPA resources.
+
+**Option A: Run with the binary**
+```sh
+# Start UI server on port 8090
+./bin/manager --server --server-addr=:8090
+```
+
+**Option B: Run from source**
+```sh
+go run ./cmd/main.go --server --server-addr=:8090
+```
+
+**Access the UI:**
+- Open http://localhost:8090 in your browser
+- Login page: http://localhost:8090/login.html
+
+**Default credentials** (configured via ConfigMap):
+| User | Password | Permission |
+|------|----------|------------|
+| admin | admin123 | Full access (7) |
+| editor | editor123 | Read+Write (6) |
+| viewer | viewer123 | Read only (4) |
+
+**Configure users:**
+```sh
+kubectl apply -f config/samples/smarthpa-users-configmap.yaml
+```
+
+### 4. Run Both Controller and UI
+
+```sh
+# Run controller + UI together
+go run ./cmd/main.go --controller --server --server-addr=:8090
+```
+
+### 5. ML Service (🚧 In Progress)
+
+> **Note:** The ML-powered trigger generation service is currently under development.
+
+The ML module will automatically analyze Prometheus metrics and generate optimal SmartHPA trigger configurations based on:
+- Peak hours detection (high traffic periods)
+- Off-peak periods (low traffic)
+- Weekend patterns
+- Seasonal variations
+
+**Preview (development mode):**
+```sh
+# Start ML service on port 8091
+go run ./cmd/main.go --ml --ml-addr=:8091 --ml-prometheus-url=http://prometheus:9090
+
+# Test trigger generation
+curl -X POST http://localhost:8091/api/v1/ml/generate \
+  -H "Content-Type: application/json" \
+  -d '{"namespace":"production","deployment":"my-app","daysToAnalyze":30}'
+```
+
+---
+
+## Development Setup
 
 If you want to build from source or contribute to SmartHPA, you'll need:
 - go version v1.22.0+
 - docker version 17.03+
+- Python 3.11+ (for ML module)
 
 **Build and push your image:**
-
 ```sh
 make docker-build docker-push IMG=<registry>/smarthpa:<tag>
 ```
 
 **Deploy to cluster:**
-
 ```sh
 make deploy IMG=<registry>/smarthpa:<tag>
 ```
 
-**Try out the examples:**
+**Run locally:**
+```sh
+make run
+```
 
+**Try out the examples:**
 ```sh
 kubectl apply -k config/samples/
 ```
 
-### Uninstallation
+---
+
+## Uninstallation
 
 **Using install.yaml:**
 ```sh
@@ -120,19 +215,36 @@ SmartHPA works by:
 4. **Managing HPA**: Updates the underlying HPA object with new configurations when time windows change
 5. **AI-Driven Scheduling**: Uses machine learning algorithms to analyze application metrics and create optimal scaling schedules
 
-## AI-Powered Scheduling (Done For You)
+## Architecture & Design
 
-SmartHPA includes a fully automated, Done For You (DFY) AI/ML-based scheduling system that completely manages your application scaling without manual intervention:
+- **Controller + Analysis module design doc**: see `docs/ANALYSIS_MODULE_DESIGN.md`
+
+## AI-Powered Scheduling (🚧 In Progress)
+
+> **Status:** The ML-powered scheduling system is currently under active development.
+
+SmartHPA will include a fully automated, Done For You (DFY) AI/ML-based scheduling system that manages your application scaling without manual intervention:
 
 - **Zero Configuration Required**: Simply enable AI and let SmartHPA handle everything
-- **Intelligent Metric Analysis**: AI continuously analyzes application metrics, resource usage, and traffic patterns
-- **Smart Schedule Generation**: Automatically creates and optimizes scaling schedules based on real-world usage
-- **Self-Learning System**: Continuously adapts and improves schedules as your application's usage patterns evolve
-- **Cost Optimization**: Automatically balances performance and resource costs, achieving up to 30% reduction in resource costs
-- **Predictive Scaling**: Anticipates traffic spikes and adjusts scaling preemptively
-- **Manual Override Available**: Retain control with the ability to override AI decisions when needed
+- **Intelligent Metric Analysis**: AI analyzes 30 days of Prometheus metrics (CPU, memory, replica counts)
+- **Pattern Detection**: Automatically detects peak hours, off-peak periods, weekend patterns, and seasonal variations
+- **Smart Schedule Generation**: Creates optimized scaling schedules based on real-world usage
+- **Cost Optimization**: Balances performance and resource costs, targeting up to 30% reduction in resource costs
 
-To experience fully automated scaling, simply set `enableAI: true` in your SmartHPA configuration. The AI system will handle everything else, from analysis to implementation. For traditional manual scheduling, set `enableAI: false`.
+**Current ML Pipeline (v2):**
+```
+Prometheus (30 days) → Data Fetcher → Preprocessor → ML Model → Trigger Generator
+```
+
+**Detected Pattern Types:**
+| Pattern | Description |
+|---------|-------------|
+| Peak | High traffic periods (e.g., 9 AM - 5 PM weekdays) |
+| Off-Peak | Low traffic periods (e.g., nights) |
+| Weekend | Saturday/Sunday patterns |
+| Seasonal | Recurring time-based patterns |
+
+For traditional manual scheduling, configure triggers directly in your SmartHPA spec.
 
 ## Example
 

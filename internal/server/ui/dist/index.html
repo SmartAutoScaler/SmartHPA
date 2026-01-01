@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartHPA Manager</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <span class="logo-text">SmartHPA Manager</span>
+            </div>
+            <div class="header-controls">
+                <div class="namespace-filter">
+                    <label>Namespace:</label>
+                    <select id="namespaceFilter">
+                        <option value="">All Namespaces</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" onclick="showCreateModal()">
+                    <span>+</span> Create SmartHPA
+                </button>
+                <div class="user-menu">
+                    <div id="userInfo" class="user-info"></div>
+                    <button class="btn btn-logout" onclick="logout()">Logout</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="container">
+        <!-- Stats -->
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="stat-label">Total SmartHPAs</div>
+                <div class="stat-value" id="totalCount">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Ready</div>
+                <div class="stat-value" id="readyCount">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Triggers</div>
+                <div class="stat-value" id="triggerCount">-</div>
+            </div>
+        </div>
+
+        <!-- List -->
+        <div class="list-header">
+            <h2 class="list-title">SmartHPA Resources</h2>
+            <button class="btn btn-secondary" onclick="fetchSmartHPAs()">↻ Refresh</button>
+        </div>
+        
+        <div id="smartHPAList">
+            <div class="loading">
+                <div class="spinner"></div>
+                Loading...
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Panel -->
+    <div class="overlay" id="overlay"></div>
+    <div class="detail-panel" id="detailPanel">
+        <div class="detail-header">
+            <div class="detail-header-top">
+                <div>
+                    <div class="detail-title" id="detailName">-</div>
+                    <div class="detail-namespace" id="detailNamespace">Namespace: -</div>
+                </div>
+                <div style="display: flex; gap: 0.5rem;" id="detailActions">
+                    <button class="btn btn-secondary" id="editBtn" onclick="editCurrentItem()">Edit</button>
+                    <button class="btn btn-danger" id="deleteBtn" onclick="deleteCurrentItem()">Delete</button>
+                    <button class="btn btn-icon btn-secondary" onclick="closeDetail()">✕</button>
+                </div>
+            </div>
+        </div>
+        <div class="detail-body" id="detailBody">
+            <!-- Content loaded dynamically -->
+        </div>
+    </div>
+
+    <!-- Create/Edit Modal -->
+    <div class="modal" id="modal">
+        <div class="modal-header">
+            <h3 class="modal-title" id="modalTitle">Create SmartHPA</h3>
+            <button class="btn btn-icon btn-secondary" onclick="closeModal()">✕</button>
+        </div>
+        <form id="smartHPAForm">
+            <div class="modal-body">
+                <!-- Basic Info Section -->
+                <div class="form-section">
+                    <div class="form-section-title">Basic Information</div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Name</label>
+                            <input type="text" class="form-input" id="formName" required placeholder="my-smarthpa">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Namespace</label>
+                            <input type="text" class="form-input" id="formNamespace" value="default" required>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">HPA Reference Name</label>
+                        <input type="text" class="form-input" id="formHPAName" placeholder="Name of the HPA to manage">
+                    </div>
+                </div>
+
+                <!-- Triggers Section -->
+                <div class="form-section">
+                    <div class="form-section-header">
+                        <div class="form-section-title">Triggers</div>
+                        <button type="button" class="btn btn-small btn-primary" onclick="addTrigger()">+ Add Trigger</button>
+                    </div>
+                    <div id="triggersContainer">
+                        <!-- Triggers will be added here dynamically -->
+                    </div>
+                    <div id="noTriggersMessage" class="empty-triggers">
+                        No triggers configured. Click "Add Trigger" to create one.
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Notification -->
+    <div class="notification" id="notification"></div>
+
+    <script src="script.js"></script>
+</body>
+</html>

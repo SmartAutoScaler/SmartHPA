@@ -24,8 +24,20 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// WeekdayShort contains short forms of weekdays
-var WeekdayShort = []string{"M", "TU", "W", "TH", "F", "SAT", "SUN"}
+// WeekdayShort contains short forms of weekdays indexed by time.Weekday()
+// Sunday=0, Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6
+var WeekdayShort = []string{"SUN", "M", "TU", "W", "TH", "F", "SAT"}
+
+// WeekdayToCron maps short weekday names to cron weekday numbers (0=Sunday, 6=Saturday)
+var WeekdayToCron = map[string]string{
+	"SUN": "0",
+	"M":   "1",
+	"TU":  "2",
+	"W":   "3",
+	"TH":  "4",
+	"F":   "5",
+	"SAT": "6",
+}
 
 // For testing purposes
 var NowFunc = time.Now
@@ -138,6 +150,38 @@ type Trigger struct {
 	EndHPAConfig   *HPAConfig `json:"endHPAConfig,omitempty" protobuf:"bytes,8,opt,name=endHPAConfig"`
 	Suspend        bool       `json:"suspend,omitempty" protobuf:"bytes,8,opt,name=suspend"`
 	//+kubebuilder:validation:Pattern=^([0-1][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$
+}
+
+// HasValidInterval returns true if the trigger has a valid recurring or date range interval.
+// Unlike NeedRecurring, this doesn't check if today matches - it just checks if the interval is defined.
+func (i *Trigger) HasValidInterval() bool {
+	if i.Interval == nil {
+		return false
+	}
+	// Has recurring pattern or date range
+	return i.Interval.Recurring != "" || (i.Interval.StartDate != "" && i.Interval.EndDate != "")
+}
+
+// GetCronWeekdays converts the recurring pattern to cron weekday numbers.
+// Returns "*" if no recurring pattern is set, or comma-separated weekday numbers (0=Sun, 6=Sat).
+func (i *Trigger) GetCronWeekdays() string {
+	if i.Interval == nil || i.Interval.Recurring == "" {
+		return "*"
+	}
+
+	days := strings.Split(i.Interval.Recurring, ",")
+	var cronDays []string
+	for _, day := range days {
+		trimmedDay := strings.TrimSpace(day)
+		if cronNum, ok := WeekdayToCron[trimmedDay]; ok {
+			cronDays = append(cronDays, cronNum)
+		}
+	}
+
+	if len(cronDays) == 0 {
+		return "*"
+	}
+	return strings.Join(cronDays, ",")
 }
 
 type Conditions []metav1.Condition

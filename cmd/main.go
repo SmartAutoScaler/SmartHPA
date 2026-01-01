@@ -17,9 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -27,10 +31,10 @@ import (
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -39,7 +43,9 @@ import (
 
 	autoscalingv1alpha1 "github.com/sarabala1979/SmartHPA/api/v1alpha1"
 	"github.com/sarabala1979/SmartHPA/internal/controller"
+	"github.com/sarabala1979/SmartHPA/internal/mlserver"
 	"github.com/sarabala1979/SmartHPA/internal/scheduler"
+	"github.com/sarabala1979/SmartHPA/internal/server"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -56,12 +62,30 @@ func init() {
 }
 
 func main() {
+	// Mode flags
+	var runController bool
+	var runServer bool
+	var serverAddr string
+	var runML bool
+	var mlAddr string
+	var mlPrometheusURL string
+	var mlModulePath string
+
+	// Controller flags
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
-	var tlsOpts []func(*tls.Config)
+
+	flag.BoolVar(&runController, "controller", false, "Run the SmartHPA controller")
+	flag.BoolVar(&runServer, "server", false, "Run the REST API server with embedded UI")
+	flag.StringVar(&serverAddr, "server-addr", ":8090", "Address for the REST API server (used with --server)")
+	flag.BoolVar(&runML, "ml", false, "Run the ML trigger generation service")
+	flag.StringVar(&mlAddr, "ml-addr", ":8091", "Address for the ML service (used with --ml)")
+	flag.StringVar(&mlPrometheusURL, "ml-prometheus-url", "http://localhost:9090", "Prometheus URL for ML service")
+	flag.StringVar(&mlModulePath, "ml-module-path", "./ml", "Path to ML Python module")
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -72,6 +96,7 @@ func main() {
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -80,7 +105,101 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	queue := make(chan types.NamespacedName)
+	// If no flags are specified, default to controller mode for backward compatibility
+	if !runController && !runServer && !runML {
+		runController = true
+	}
+
+	// Log which modes are enabled
+	modes := []string{}
+	if runController {
+		modes = append(modes, "controller")
+	}
+	if runServer {
+		modes = append(modes, "server")
+	}
+	if runML {
+		modes = append(modes, "ml")
+	}
+	setupLog.Info("Starting SmartHPA", "modes", modes)
+
+	// Create context with signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle OS signals
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		setupLog.Info("Received shutdown signal")
+		cancel()
+	}()
+
+	if runServer {
+		go func() {
+			if err := runAPIServer(ctx, serverAddr); err != nil {
+				setupLog.Error(err, "REST API server error")
+			}
+		}()
+	}
+
+	if runML {
+		go func() {
+			if err := runMLServer(ctx, mlAddr, mlPrometheusURL, mlModulePath); err != nil {
+				setupLog.Error(err, "ML server error")
+			}
+		}()
+	}
+
+	if runController {
+		if err := runControllerManager(ctx, metricsAddr, probeAddr, enableLeaderElection, secureMetrics, enableHTTP2); err != nil {
+			setupLog.Error(err, "problem running controller manager")
+			os.Exit(1)
+		}
+	} else {
+		// If server-only or ML-only mode, wait for context cancellation
+		setupLog.Info("Running in server/ML only mode, waiting for shutdown signal")
+		<-ctx.Done()
+	}
+}
+
+// runAPIServer starts the REST API server with embedded UI
+func runAPIServer(ctx context.Context, addr string) error {
+	setupLog.Info("Starting REST API server", "addr", addr)
+
+	// Create K8s client
+	cfg := ctrl.GetConfigOrDie()
+	k8sClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("failed to create K8s client: %w", err)
+	}
+
+	// Create and start server
+	srv := server.NewServer(k8sClient, addr)
+	return srv.Start(ctx)
+}
+
+// runMLServer starts the ML trigger generation service
+func runMLServer(ctx context.Context, addr, prometheusURL, modulePath string) error {
+	setupLog.Info("Starting ML server", "addr", addr, "prometheus", prometheusURL)
+
+	config := mlserver.Config{
+		Addr:          addr,
+		PrometheusURL: prometheusURL,
+		MLModulePath:  modulePath,
+	}
+
+	srv := mlserver.NewServer(config)
+	return srv.Start(ctx)
+}
+
+// runControllerManager runs the SmartHPA controller
+func runControllerManager(ctx context.Context, metricsAddr, probeAddr string, enableLeaderElection, secureMetrics, enableHTTP2 bool) error {
+	var tlsOpts []func(*tls.Config)
+
+	// Use buffered queue for better throughput and to prevent blocking
+	queue := scheduler.NewSchedulerQueue()
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -145,38 +264,37 @@ func main() {
 		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
+		return fmt.Errorf("unable to start manager: %w", err)
 	}
 
+	// Create scheduler first so we can pass it to the controller
+	hpaScheduler := scheduler.NewScheduler(mgr.GetClient(), queue)
+
+	// Setup controller with scheduler reference for cleanup coordination
 	if err = (&controller.SmartHorizontalPodAutoscalerReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr, queue); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "SmartHorizontalPodAutoscaler")
-		os.Exit(1)
+	}).SetupWithManager(mgr, queue, hpaScheduler); err != nil {
+		return fmt.Errorf("unable to create controller: %w", err)
 	}
 
-	// Create and register scheduler with manager for proper lifecycle management
-	hpaScheduler := scheduler.NewScheduler(mgr.GetClient(), queue)
+	// Register scheduler with manager for proper lifecycle management
 	if err := mgr.Add(hpaScheduler); err != nil {
-		setupLog.Error(err, "unable to add scheduler to manager")
-		os.Exit(1)
+		return fmt.Errorf("unable to add scheduler to manager: %w", err)
 	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
+		return fmt.Errorf("unable to set up health check: %w", err)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
+		return fmt.Errorf("unable to set up ready check: %w", err)
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("problem running manager: %w", err)
 	}
+
+	return nil
 }
