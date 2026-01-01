@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Note: namespace is inherited from parent kustomization (config/default)
+
+resources:
+- deployment.yaml
+- service.yaml
+# Uncomment to include ingress
+# - ingress.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: smarthpa
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+- name: quay.io/sarabala1979/smarthpa
+  newTag: latest
+

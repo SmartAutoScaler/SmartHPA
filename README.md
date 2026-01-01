@@ -79,17 +79,39 @@ kubectl get crd smarthorizontalpodautoscalers.autoscaling.sarabala.io
 kubectl apply -f config/samples/example-hpa.yaml
 ```
 
-### 3. Start the UI (Optional)
+### 3. Deploy the UI (Optional)
 
 The SmartHPA UI provides a web interface for managing SmartHPA resources.
 
-**Option A: Run with the binary**
+**Option A: Deploy to Kubernetes cluster**
+```sh
+# Apply UI deployment and service
+kubectl apply -k config/ui/
+
+# Verify deployment
+kubectl get pods -n smarthpa-system -l app=smarthpa-ui
+kubectl get svc -n smarthpa-system smarthpa-ui
+```
+
+**Access the UI in cluster:**
+```sh
+# Port forward to access locally
+kubectl port-forward -n smarthpa-system svc/smarthpa-ui 8090:80
+
+# Or use NodePort (port 30090)
+# http://<node-ip>:30090
+
+# Or configure Ingress (edit config/ui/ingress.yaml first)
+kubectl apply -f config/ui/ingress.yaml
+```
+
+**Option B: Run locally with the binary**
 ```sh
 # Start UI server on port 8090
 ./bin/manager --server --server-addr=:8090
 ```
 
-**Option B: Run from source**
+**Option C: Run from source**
 ```sh
 go run ./cmd/main.go --server --server-addr=:8090
 ```
@@ -108,6 +130,30 @@ go run ./cmd/main.go --server --server-addr=:8090
 **Configure users:**
 ```sh
 kubectl apply -f config/samples/smarthpa-users-configmap.yaml
+```
+
+**UI Deployment Architecture:**
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    smarthpa-system namespace                  │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌─────────────────┐     ┌─────────────────┐                │
+│  │ smarthpa-ui     │     │ smarthpa-       │                │
+│  │ Deployment      │     │ controller      │                │
+│  │ (REST + WebUI)  │     │ Deployment      │                │
+│  └────────┬────────┘     └─────────────────┘                │
+│           │                                                  │
+│  ┌────────┴────────┐                                        │
+│  │ smarthpa-ui     │◄──── ClusterIP:80                      │
+│  │ Service         │◄──── NodePort:30090                    │
+│  └────────┬────────┘                                        │
+│           │                                                  │
+│  ┌────────┴────────┐                                        │
+│  │ Ingress         │◄──── smarthpa.example.com              │
+│  │ (optional)      │                                        │
+│  └─────────────────┘                                        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### 4. Run Both Controller and UI

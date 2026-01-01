@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ui
+  labels:
+    app: smarthpa-ui
+    app.kubernetes.io/name: smarthpa-ui
+    app.kubernetes.io/component: ui
+  annotations:
+    # Uncomment for NGINX Ingress Controller
+    # nginx.ingress.kubernetes.io/rewrite-target: /
+    # kubernetes.io/ingress.class: nginx
+    
+    # Uncomment for AWS ALB
+    # kubernetes.io/ingress.class: alb
+    # alb.ingress.kubernetes.io/scheme: internet-facing
+    # alb.ingress.kubernetes.io/target-type: ip
+spec:
+  rules:
+  - host: smarthpa.example.com  # Replace with your domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: smarthpa-ui
+            port:
+              number: 80
+  # Uncomment for TLS
+  # tls:
+  # - hosts:
+  #   - smarthpa.example.com
+  #   secretName: smarthpa-tls
+
