@@ -240,3 +240,5 @@ type SessionResponse struct {
 	Permission    int    `json:"permission,omitempty"`
 }
 
+
+

@@ -123,3 +123,5 @@ class PatternResult:
     confidence: float
     sample_count: int
 
+
+

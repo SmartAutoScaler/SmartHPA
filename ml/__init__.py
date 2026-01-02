@@ -8,3 +8,5 @@ from .pattern_analyzer import PatternAnalyzer
 __version__ = "1.0.0"
 __all__ = ["TriggerGenerator", "PrometheusMetricsClient", "PatternAnalyzer"]
 
+
+

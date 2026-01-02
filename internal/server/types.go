@@ -54,3 +54,5 @@ type UpdateSmartHPARequest struct {
 	HPAObjectRef *autoscalingv1alpha1.HPAObjectReference `json:"hpaObjectRef,omitempty"`
 	Triggers     autoscalingv1alpha1.Triggers            `json:"triggers,omitempty"`
 }
+
+

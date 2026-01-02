@@ -322,3 +322,5 @@ if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))
     generator.save_to_csv(os.path.join(script_dir, "synthetic_data.csv"))
 
+
+
